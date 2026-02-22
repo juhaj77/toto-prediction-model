@@ -423,7 +423,7 @@ async function ajaOpetus() {
         batchSize: 64,
         validationSplit: 0.1,
         shuffle: true,
-        classWeight: { 0: 1.0, 1: 2.0 },
+        classWeight: { 0: 1.0, 1: 1.3 },
         callbacks: {
             onEpochBegin: async () => { epochStartTime = Date.now(); },
             onEpochEnd: async (epoch, logs) => {

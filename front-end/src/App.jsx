@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
+import RunnerModal from './RunnerModal.jsx';
 import * as tf from '@tensorflow/tfjs';
 
 // ─── CONFIG ────────────────────────────────────────────────────────────────────
@@ -79,20 +80,19 @@ function parseKengat(val) {
     return 'UNKNOWN';
 }
 
-// Peli% — sama kuin scraper: percentage / 100
+// Peli% — betPercentages.KAK.percentage (arvo on ×100, esim 1148 = 11.48%)
 function parsePeliProsentti(runner) {
-    const pct = runner.percentage ?? runner.winPercentage ?? 0;
+    const pct = runner.betPercentages?.KAK?.percentage ?? 0;
     return parseFloat(pct) / 100;
 }
 
-// Voitto% — sama kuin scraper statBlock: position1/starts*100
+// Voitto% — stats.total.winningPercent suoraan (Veikkaus API laskee valmiiksi)
 function parseVoittoProsentti(runner) {
     try {
-        const stats  = runner.statistics?.total || runner.stats?.total;
-        if (!stats) return 0;
-        const starts = parseInt(stats.starts || stats.startCount || 0);
-        const wins   = parseInt(stats.position1 || stats.wins || 0);
-        if (starts > 0) return Math.round((wins / starts) * 100 * 100) / 100;
+        const total = runner.stats?.total;
+        if (total?.winningPercent != null) return parseFloat(total.winningPercent);
+        // fallback: laske itse
+        if (total?.starts > 0) return Math.round((total.position1 / total.starts) * 10000) / 100;
     } catch {}
     return 0;
 }
@@ -307,6 +307,11 @@ export default function App() {
     const [maps,            setMaps]            = useState(null);
     const [modelInfo,       setModelInfo]       = useState(null);
     const [modelStatus,     setModelStatus]     = useState('idle');
+    const [modalOpen,       setModalOpen]       = useState(false);
+    const [modalRaceId,     setModalRaceId]     = useState('');
+    const [modalRaceLabel,  setModalRaceLabel]  = useState('');
+    const [modalRace,       setModalRace]       = useState(null);
+    const [modalRunners,    setModalRunners]    = useState(null); // raw API data suoraan
 
     // ── Ladataan malli + mappings kerran ────────────────────────────────────
     useEffect(() => {
@@ -383,6 +388,7 @@ export default function App() {
             const currIsAuto = (race.startType === 'CAR_START' || race.startType === 'AUTO');
 
             const runnersRaw = await fetch(`/api-veikkaus/api/toto-info/v1/race/${raceId}/runners`).then(r => r.json());
+            setModalRunners({ raw: runnersRaw, race: race }); // tallennetaan modalille
 
             // Veikkaus API voi palauttaa hevoset usealla eri tavalla — kokeillaan kaikki vaihtoehdot
             const runnersArr = Array.isArray(runnersRaw)
@@ -415,7 +421,7 @@ export default function App() {
                     ...parseEnnatys(r),
                     peliP:        parsePeliProsentti(r),
                     voittoP:      parseVoittoProsentti(r),
-                    priorStarts:  r.priorStarts || r.previousStarts || r.starts || [],
+                    priorStarts:  r.prevStarts || [],
                 }));
 
             console.log('[runners] Hevosia filtteröinnin jälkeen:', runners.length);
@@ -550,6 +556,25 @@ export default function App() {
                     }}>
                         {loadingEnnustus ? 'Lasketaan…' : '▶ Aja ennustus'}
                     </button>
+
+                    {valittuLahto && (
+                        <button onClick={() => {
+                            const race = lahdot.find(l => String(l.number) === String(valittuLahto));
+                            if (!race) return;
+                            setModalRaceId(String(race.raceId || race.id));
+                            setModalRaceLabel(`Lähtö ${valittuLahto} · ${race.distance}m`);
+                            setModalRace(race);
+                            setModalOpen(true);
+                        }} style={{
+                            padding: '10px 20px',
+                            background: '#0f1520', color: '#4a90d9',
+                            border: '1px solid #2a4060', borderRadius: 4,
+                            fontFamily: 'inherit', fontSize: 13, letterSpacing: 1,
+                            cursor: 'pointer', transition: 'all 0.2s',
+                        }}>
+                            ⊞ Katso lähdön tiedot
+                        </button>
+                    )}
                 </div>
 
                 {/* Ennustusvirhe */}
@@ -601,12 +626,12 @@ export default function App() {
                                             {(1 / e.prob).toFixed(2)}
                                         </td>
                                         <td style={{ padding: '10px 12px' }}>
-                      <span style={{ padding: '2px 10px', borderRadius: 3, fontSize: 11, letterSpacing: 1,
-                          background: e.prob > 0.5 ? '#0d2a1a' : '#111',
-                          color:      e.prob > 0.5 ? '#2ecc71'  : '#444',
-                          border: `1px solid ${e.prob > 0.5 ? '#2ecc71' : '#222'}` }}>
-                        {e.prob > 0.5 ? 'PELATTAVA' : 'HUTI'}
-                      </span>
+                                          <span style={{ padding: '2px 10px', borderRadius: 3, fontSize: 11, letterSpacing: 1,
+                                              background: e.prob > 0.5 ? '#0d2a1a' : '#111',
+                                              color:      e.prob > 0.5 ? '#2ecc71'  : '#444',
+                                              border: `1px solid ${e.prob > 0.5 ? '#2ecc71' : '#222'}` }}>
+                                            {e.prob > 0.5 ? 'PELATTAVA' : 'HUTI'}
+                                          </span>
                                         </td>
                                     </tr>
                                 ))}
@@ -615,6 +640,17 @@ export default function App() {
                         </div>
                     </div>
                 )}
+                {/* Lähtötietomodaali */}
+                {modalOpen && (
+                    <RunnerModal
+                        raceId={modalRaceId}
+                        race={modalRace}
+                        raceLabel={modalRaceLabel}
+                        preloadedData={modalRunners}
+                        onClose={() => setModalOpen(false)}
+                    />
+                )}
+
             </div>
         </div>
     );
