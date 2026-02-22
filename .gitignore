@@ -1,0 +1,23 @@
+# Dependencies
+**/node_modules/
+
+# IDE settings
+.idea/
+*.swp
+*.swo
+
+# OS generated files
+.DS_Store
+Thumbs.db
+
+# Build outputs
+front-end/dist/
+
+# Local logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# (Valinnainen) Jos haluat kuitenkin piilottaa datat myöhemmin
+# *.csv
+# mappings.json
