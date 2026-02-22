@@ -1,7 +1,7 @@
 const tf = require('@tensorflow/tfjs');
 const fs = require('fs');
 const csv = require('csv-parser');
-const OPETUS_DATA = './Ravit_Opetus_Data_yhdistetty_v2.csv';
+const OPETUS_DATA = './Ravit_Opetus_Data_Yhdistetty_v3.csv';
 const ENNUSTE_DATA = './Ravit_443077258_lahto1.csv';
 const MAPPINGS_FILE = './mappings.json';
 const MODEL_FOLDER = './ravimalli-mixed-2';
@@ -26,7 +26,8 @@ const saveModelBase64 = async (model, trainingMeta = {}) => {
                 learningRate:   trainingMeta.lr          ?? null,
                 dataStartDate:  trainingMeta.dataStartDate ?? null,   // vanhin Current_Start_Date opetusdatassa
                 dataEndDate:    trainingMeta.dataEndDate   ?? null,   // uusin Current_Start_Date opetusdatassa
-                totalStarts:    trainingMeta.totalStarts   ?? null,   // yksittäiset hevonen+lähtö -parit
+                totalRows:      trainingMeta.totalRows     ?? null,   // CSV-rivien kokonaismäärä (historia+current)
+                totalStarts:    trainingMeta.totalStarts   ?? null,   // uniikkeja hevonen+lähtö -pareja
             }
         };
         fs.writeFileSync(`${MODEL_FOLDER}/model_full.json`, JSON.stringify(modelData));
@@ -88,7 +89,7 @@ function pvmToDate(pvmStr) {
 function kompensoiKmAika(km, matka) {
     if (!km || isNaN(km) || km <= 0) return km;
     const eroMetreina = 2100 - matka;
-    const kompensaatio = (eroMetreina / 500) * 1.0;
+    const kompensaatio = (eroMetreina / 2000) * 1.0;  // kerroin optimoitu: korrelaatio hist_sij 0.031→0.090
     return km + kompensaatio;
 }
 
@@ -335,7 +336,8 @@ async function lataaJaSiivoaData(tiedostopolku, isTraining = true) {
                 // totalStarts = yksittäiset (hevonen × current-lähtö) -parit.
                 // Jokaiseen hevoseen sisältyy 1 current + max 8 historia = max 9 lähtöä,
                 // mutta totalStarts laskee vain uniikkeja current-lähtöjä.
-                const totalStarts = Object.keys(kisaajat).length;
+                const totalRows  = rawRows.length;              // CSV-rivien kokonaismäärä
+                const totalStarts = Object.keys(kisaajat).length;  // uniikkeja hevonen+lähtö -pareja
 
                 const allDates = rawRows
                     .map(r => r.Current_Start_Date || '')
@@ -348,7 +350,7 @@ async function lataaJaSiivoaData(tiedostopolku, isTraining = true) {
                 const dataEndDate   = allDates.length > 0 ? allDates[allDates.length - 1].toISOString().slice(0, 10) : null;
 
                 if (isTraining) {
-                    console.log(`  ✓ Dataa: ${totalStarts} starttia, ${dataStartDate} → ${dataEndDate}`);
+                    console.log(`  ✓ Dataa: ${totalRows} riviä (${totalStarts} starttia), ${dataStartDate} → ${dataEndDate}`);
                 }
 
                 resolve({
@@ -358,7 +360,7 @@ async function lataaJaSiivoaData(tiedostopolku, isTraining = true) {
                     metadata: metadata,
                     histFeatureCount: 25,
                     staticFeatureCount: 25,
-                    dataMeta: { totalStarts, dataStartDate, dataEndDate }
+                    dataMeta: { totalRows, totalStarts, dataStartDate, dataEndDate }
                 });
             })
             .on('error', reject);
@@ -447,6 +449,7 @@ async function ajaOpetus() {
                         lr:            currentLR,
                         dataStartDate: data.dataMeta.dataStartDate,
                         dataEndDate:   data.dataMeta.dataEndDate,
+                        totalRows:     data.dataMeta.totalRows,
                         totalStarts:   data.dataMeta.totalStarts,
                     });
                 } else {
@@ -490,9 +493,9 @@ async function ajaEnnustus() {
     data.static.dispose();
     predictions.dispose();
 }
-
 (async () => {
     await ajaOpetus();
     await ajaEnnustus();
 })();
+//ajaOpetus();
 // ajaEnnustus();
