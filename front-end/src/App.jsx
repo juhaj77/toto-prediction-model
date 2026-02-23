@@ -168,7 +168,35 @@ function buildFeatures(runners, maps, currDate, currDist, isSH, currIsAuto) {
         const cSpecActive = cSpec === 'YES' ? 1 : 0;
         const cSpecKnown  = (cSpec === 'YES' || cSpec === 'NO') ? 1 : 0;
 
-        // 25 staattista featurea — täsmälleen sama järjestys kuin ravimalli.js
+        // ── prevIndeksiNorm + histKnown ──────────────────────────────────────
+        // Huom: hist-muuttuja määritellään myöhemmin historia-sekvenssejä varten,
+        // mutta tarvitaan jo tässä — määritellään runner.priorStarts:sta
+        const _histRivit = (runner.priorStarts || []).filter(h => {
+            const pvm   = (h.shortMeetDate || h.meetDate || '').toString().trim();
+            const kuski = (h.driverFullName || h.driverName || '').toString().trim();
+            return pvm !== '' && pvm !== '0' && pvm !== 'NaT'
+                && kuski !== '' && kuski !== '0' && kuski !== '<undefined>';
+        });
+        const histKnown = _histRivit.length > 0 ? 1 : 0;
+        let prevIndeksiNorm = 0;
+        if (_histRivit.length > 0) {
+            let indeksi = 0, nValidia = 0;
+            _histRivit.forEach(h => {
+                // h.result on API:ssa sijoitus merkkijonona, esim. "1", "4", "d"
+                const sijRaw = String(h.result || '').toLowerCase();
+                const m = sijRaw.match(/^\d+/);
+                if (!m) return;
+                const sij = parseInt(m[0]);
+                if (sij <= 0 || sij > 16) return;
+                nValidia++;
+                if      (sij === 1) indeksi += 1.00;
+                else if (sij === 2) indeksi += 0.50;
+                else if (sij === 3) indeksi += 0.33;
+            });
+            prevIndeksiNorm = nValidia > 0 ? indeksi / nValidia : 0;
+        }
+
+        // 27 staattista featurea — täsmälleen sama järjestys kuin ravimalli.js
         const staticFeats = [
             (parseFloat(runner.nro) || 1) / 20,                                         // 0
             getMapID(maps.valmentajat, runner.valmentaja, 'valmentaja') / 2000,          // 1
@@ -189,6 +217,8 @@ function buildFeatures(runners, maps, currDate, currDist, isSH, currIsAuto) {
             cSpecActive, cSpecKnown,                                                     // 19-20
             peliRank   / 20, hPeliKnown,                                                 // 21-22
             voittoRank / 20, hVoittoKnown,                                               // 23-24
+            prevIndeksiNorm,                                                             // 25
+            histKnown,                                                                   // 26
         ];
 
         // Historia-sekvenssit — täsmälleen sama kuin ravimalli.js historySeq
@@ -626,12 +656,12 @@ export default function App() {
                                             {(1 / e.prob).toFixed(2)}
                                         </td>
                                         <td style={{ padding: '10px 12px' }}>
-                                          <span style={{ padding: '2px 10px', borderRadius: 3, fontSize: 11, letterSpacing: 1,
-                                              background: e.prob > 0.5 ? '#0d2a1a' : '#111',
-                                              color:      e.prob > 0.5 ? '#2ecc71'  : '#444',
-                                              border: `1px solid ${e.prob > 0.5 ? '#2ecc71' : '#222'}` }}>
-                                            {e.prob > 0.5 ? 'PELATTAVA' : 'HUTI'}
-                                          </span>
+                      <span style={{ padding: '2px 10px', borderRadius: 3, fontSize: 11, letterSpacing: 1,
+                          background: e.prob > 0.5 ? '#0d2a1a' : '#111',
+                          color:      e.prob > 0.5 ? '#2ecc71'  : '#444',
+                          border: `1px solid ${e.prob > 0.5 ? '#2ecc71' : '#222'}` }}>
+                        {e.prob > 0.5 ? 'PELATTAVA' : 'HUTI'}
+                      </span>
                                         </td>
                                     </tr>
                                 ))}

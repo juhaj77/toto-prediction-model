@@ -23,6 +23,7 @@ const STATIC_COLS = [
     { key: 'Voitto_pros',         label: 'Voitto%',      w: 66 },
     { key: 'Ennatys_nro',         label: 'Ennätys',      w: 70 },
     { key: 'Is_Auto_Record',      label: 'AutoRec',      w: 60 },
+    { key: 'PrevIndeksiNorm',     label: 'Podium%',      w: 68 },
 ];
 const HIST_COLS = [
     { key: 'Hist_PVM',            label: 'Hist.PVM',     w: 86 },
@@ -147,6 +148,19 @@ function buildRows(runnersArr, raceInfo) {
     for (const r of runnersArr) {
         const { ennatys, isAutoRecord } = parseEnnatys(r);
 
+        // prevIndeksiNorm
+        const _prevAll = r.prevStarts || r.priorStarts || [];
+        let _prevIndeksiNorm = 0;
+        { let ind = 0, n = 0;
+            _prevAll.forEach(h => {
+                const s = String(h.result || ''), m = s.match(/^\d+/);
+                if (!m) return; const sij = parseInt(m[0]);
+                if (sij < 1 || sij > 16) return; n++;
+                if (sij===1) ind+=1.00; else if (sij===2) ind+=0.50; else if (sij===3) ind+=0.33;
+            });
+            _prevIndeksiNorm = n > 0 ? ind / n : 0;
+        }
+
         const base = {
             Nro:                  r.startNumber             || '',
             Nimi:                 r.horseName               || '',
@@ -168,6 +182,7 @@ function buildRows(runnersArr, raceInfo) {
             Voitto_pros:          parseVoittoP(r) > 0 ? parseVoittoP(r).toFixed(1) + '%' : '—',
             Ennatys_nro:          ennatys > 0 ? ennatys.toFixed(2) : '—',
             Is_Auto_Record:       isAutoRecord ? '✓' : '',
+            PrevIndeksiNorm:      _prevIndeksiNorm > 0 ? _prevIndeksiNorm.toFixed(3) : '—',
         };
 
         // KRIITTINEN: JSON:issa historia on "prevStarts" — EI "priorStarts"!
@@ -329,16 +344,16 @@ export default function RunnerModal({ raceId, race, raceLabel, preloadedData, on
                 padding: '8px 14px', background: '#07090e',
                 borderBottom: '1px solid #151c28',
             }}>
-                <button onClick={onClose} style={{
-                    background: 'none', border: '1px solid #1e2c40', color: '#ccd',
-                    borderRadius: 4, padding: '2px 11px', fontFamily: 'inherit',
-                    fontSize: 15, cursor: 'pointer',
-                }}>✕</button>
-                <span style={{ fontSize: 10, letterSpacing: 3, color: '#3a6090', textTransform: 'uppercase' }}>
+        <span style={{ fontSize: 10, letterSpacing: 3, color: '#3a6090', textTransform: 'uppercase' }}>
           LÄHTÖTIEDOT
         </span>
                 <span style={{ fontSize: 13, fontWeight: 700, color: '#e8eaf0' }}>{raceLabel}</span>
-                <span style={{ marginLeft: 'auto', fontSize: 10, color: '#222' }}>ESC sulkee</span>
+                <span style={{ marginLeft: 'auto', fontSize: 10, color: '#334' }}>ESC sulkee</span>
+                <button onClick={onClose} style={{
+                    background: 'none', border: '1px solid #1e2c40', color: '#ccd',
+                    borderRadius: 4, padding: '2px 11px', fontFamily: 'inherit',
+                    fontSize: 15, cursor: 'pointer', marginLeft: 8,
+                }}>✕</button>
             </div>
 
             {/* Taulukko */}

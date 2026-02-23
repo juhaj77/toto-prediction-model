@@ -203,6 +203,30 @@ async function lataaJaSiivoaData(tiedostopolku, isTraining = true) {
 
                 // ─── TÄSSÄ KOHTAA KUTSUTAAN getMapID → maps täyttyy ───
                 Object.values(kisaajat).forEach(hist => {
+
+                    const histRivit = hist.filter(h => {
+                        const pvm   = (h.Hist_PVM || '').toString().trim();
+                        const kuski = (h.Ohjastaja || '').toString().trim();
+                        return pvm !== '' && pvm !== '0' && pvm !== 'NaT'
+                            && kuski !== '' && kuski !== '0' && kuski !== '<undefined>';
+                    });
+                    const histKnown = histRivit.length > 0 ? 1 : 0;
+
+                    let prevIndeksiNorm = 0;
+                    if (histRivit.length > 0) {
+                        let indeksi = 0;
+                        let nValidia = 0;
+                        histRivit.forEach(h => {
+                            const sij = parseInt(h.Hist_Sij);
+                            if (isNaN(sij) || sij <= 0 || sij > 16) return; // hyl/kesk/tyhjä → ohita
+                            nValidia++;
+                            if      (sij === 1) indeksi += 1.00;
+                            else if (sij === 2) indeksi += 0.50;
+                            else if (sij === 3) indeksi += 0.33;
+                        });
+                        prevIndeksiNorm = nValidia > 0 ? indeksi / nValidia : 0;
+                    }
+
                     const current = hist[0];
 
                     const rankKey = `${current.RaceID}_${current.Current_Start_Date}_${current.Nimi}`;
@@ -245,7 +269,8 @@ async function lataaJaSiivoaData(tiedostopolku, isTraining = true) {
                         parseInt(current.Is_Auto_Record) || 0,
                         cSpecActive, cSpecKnown,
                         peliRankingFinal / 20, rankMeta.peliKnown,
-                        voittoRankingFinal / 20, rankMeta.voittoKnown
+                        voittoRankingFinal / 20, rankMeta.voittoKnown,
+                        histKnown, prevIndeksiNorm
                     ];
 
                     const historySeq = hist.slice(0, MAX_HISTORY).map((h) => {
@@ -359,7 +384,7 @@ async function lataaJaSiivoaData(tiedostopolku, isTraining = true) {
                     y: isTraining ? tf.tensor2d(Y, [Y.length, 1]) : null,
                     metadata: metadata,
                     histFeatureCount: 25,
-                    staticFeatureCount: 25,
+                    staticFeatureCount: 27,
                     dataMeta: { totalRows, totalStarts, dataStartDate, dataEndDate }
                 });
             })
