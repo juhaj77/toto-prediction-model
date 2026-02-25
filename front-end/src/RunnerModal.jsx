@@ -1,236 +1,230 @@
 import React, { useEffect, useState } from 'react';
 
-// ─────────────────────────────────────────────────────────────────────────────
-// SARAKKEET — täsmälleen CSV:n järjestys (ilman RaceID, Scratched, SIJOITUS)
-// ─────────────────────────────────────────────────────────────────────────────
+// ─── COLUMNS ──────────────────────────────────────────────────────────────────
+// Static (per runner) and historical (per prior start) column definitions.
+// Päivä / Current_Start_Date removed — it is always today and adds no value.
+
 const STATIC_COLS = [
-    { key: 'Nro',                 label: 'Nro',         w: 42 },
-    { key: 'Nimi',                label: 'Nimi',         w: 175 },
-    { key: 'Valmentaja',          label: 'Valmentaja',   w: 150 },
-    { key: 'Current_Ohjastaja',   label: 'Ohj.',         w: 150 },
-    { key: 'Ika',                 label: 'Ikä',          w: 36 },
-    { key: 'Sukupuoli',           label: 'Sp',           w: 30 },
-    { key: 'Is_Suomenhevonen',    label: 'SH',           w: 30 },
-    { key: 'Kengat_Etu',          label: 'K.Etu',        w: 68 },
-    { key: 'Kengat_Taka',         label: 'K.Taka',       w: 68 },
-    { key: 'Kengat_etu_changed',  label: 'Etu↑',         w: 40 },
-    { key: 'Kengat_taka_changed', label: 'Taka↑',        w: 46 },
-    { key: 'Current_Special_Cart',label: 'Cart',         w: 46 },
-    { key: 'Current_Distance',    label: 'Matka',        w: 56 },
-    { key: 'Current_Is_Auto',     label: 'Auto',         w: 40 },
-    { key: 'Current_Start_Date',  label: 'Päivä',        w: 90 },
-    { key: 'Peli_pros',           label: 'Peli%',        w: 60 },
-    { key: 'Voitto_pros',         label: 'Voitto%',      w: 66 },
-    { key: 'Ennatys_nro',         label: 'Ennätys',      w: 70 },
-    { key: 'Is_Auto_Record',      label: 'AutoRec',      w: 60 },
-    { key: 'PrevIndeksiNorm',     label: 'Podium%',      w: 68 },
-];
-const HIST_COLS = [
-    { key: 'Hist_PVM',            label: 'Hist.PVM',     w: 86 },
-    { key: 'Ohjastaja',           label: 'Hist.Ohj',     w: 140 },
-    { key: 'Rata',                label: 'Rata',         w: 46 },
-    { key: 'Matka',               label: 'Matka',        w: 56 },
-    { key: 'RataNro',             label: 'RataNro',      w: 60 },
-    { key: 'Km_aika',             label: 'Km-aika',      w: 72 },
-    { key: 'Hist_kengat_etu',     label: 'K.Etu',        w: 58 },
-    { key: 'Hist_kengat_taka',    label: 'K.Taka',       w: 58 },
-    { key: 'Hist_Special_Cart',   label: 'Cart',         w: 46 },
-    { key: 'Hist_Is_Auto',        label: 'Auto',         w: 40 },
-    { key: 'Laukka',              label: 'Laukka',       w: 50 },
-    { key: 'Hylatty',             label: 'Hyl.',         w: 40 },
-    { key: 'Keskeytys',           label: 'Kesk.',        w: 46 },
-    { key: 'Track_Condition',     label: 'Rata kunto',   w: 100 },
-    { key: 'Hist_Sij',            label: 'Sij.',         w: 40 },
-    { key: 'Kerroin',             label: 'Kerroin',      w: 66 },
-    { key: 'Palkinto',            label: 'Palkinto €',   w: 86 },
+    { key: 'number',           label: 'No',          w: 42  },
+    { key: 'name',             label: 'Horse',        w: 175 },
+    { key: 'coach',            label: 'Coach',        w: 150 },
+    { key: 'driver',           label: 'Driver',       w: 150 },
+    { key: 'age',              label: 'Age',          w: 36  },
+    { key: 'gender',           label: 'Sex',          w: 30  },
+    { key: 'isColdBlood',      label: 'CB',           w: 30  },
+    { key: 'frontShoes',       label: 'F.Shoe',       w: 68  },
+    { key: 'rearShoes',        label: 'R.Shoe',       w: 68  },
+    { key: 'frontShoeChg',     label: 'F↑',           w: 40  },
+    { key: 'rearShoeChg',      label: 'R↑',           w: 46  },
+    { key: 'specialCart',      label: 'Cart',         w: 46  },
+    { key: 'distance',         label: 'Dist',         w: 56  },
+    { key: 'isCarStart',       label: 'Car',          w: 40  },
+    { key: 'bettingPct',       label: 'Bet%',         w: 60  },
+    { key: 'winPct',           label: 'Win%',         w: 66  },
+    { key: 'record',           label: 'Record',       w: 70  },
+    { key: 'isAutoRecord',     label: 'AutoRec',      w: 60  },
+    { key: 'prevIndexNorm',    label: 'PodiumIdx',    w: 72  },
 ];
 
-// ─────────────────────────────────────────────────────────────────────────────
-// PARSINTA — täsmälleen MATLAB-scraperin logiikka JSON-kentillä
-// ─────────────────────────────────────────────────────────────────────────────
-function fmtKengat(v) {
+const HIST_COLS = [
+    { key: 'date',             label: 'Date',         w: 86  },
+    { key: 'driver',           label: 'Driver',       w: 140 },
+    { key: 'track',            label: 'Track',        w: 46  },
+    { key: 'distance',         label: 'Dist',         w: 56  },
+    { key: 'startPos',         label: 'StartPos',     w: 60  },
+    { key: 'kmTime',           label: 'km/min',       w: 72  },
+    { key: 'frontShoes',       label: 'F.Shoe',       w: 58  },
+    { key: 'rearShoes',        label: 'R.Shoe',       w: 58  },
+    { key: 'specialCart',      label: 'Cart',         w: 46  },
+    { key: 'isCarStart',       label: 'Car',          w: 40  },
+    { key: 'break',            label: 'Break',        w: 50  },
+    { key: 'disqualified',     label: 'Disq',         w: 40  },
+    { key: 'DNF',              label: 'DNF',          w: 46  },
+    { key: 'trackCondition',   label: 'Track cond.',  w: 100 },
+    { key: 'position',         label: 'Pos',          w: 40  },
+    { key: 'odd',              label: 'Odd',          w: 66  },
+    { key: 'prize',            label: 'Prize €',      w: 86  },
+];
+
+// ─── FORMATTERS ───────────────────────────────────────────────────────────────
+
+const fmtShoes = v => {
     const s = String(v || '').toUpperCase();
     if (s === 'HAS_SHOES') return '✓';
     if (s === 'NO_SHOES')  return '—';
     return '?';
-}
-function fmtCart(v) {
+};
+
+const fmtCart = v => {
     const s = String(v || '').toUpperCase();
     if (s === 'YES') return '✓';
     if (s === 'NO')  return '—';
     return s || '?';
-}
+};
 
-function parseEnnatys(r) {
-    // MATLAB: eMatch = regexp(block, '"(handicapRaceRecord|mobileStartRecord|vaultStartRecord)":"([\d,]+)[a-z]*"')
+const fmtPosition = n => {
+    if (n === 20) return 'Disq';
+    if (n === 21) return 'DNF';
+    if (!n || n === 10) return '—';
+    return String(n);
+};
+
+// ─── PARSERS — must match scraper.js and ravimalli.js exactly ─────────────────
+
+function parseRecord(runner) {
     for (const key of ['handicapRaceRecord', 'mobileStartRecord', 'vaultStartRecord']) {
-        const val = r[key];
-        if (val) {
-            const numStr = String(val).match(/[\d,]+/)?.[0] || '';
-            const n = parseFloat(numStr.replace(',', '.'));
-            if (!isNaN(n) && n > 0)
-                return { ennatys: n, isAutoRecord: key === 'mobileStartRecord' ? 1 : 0 };
-        }
+        const val = runner[key];
+        if (!val) continue;
+        const n = parseFloat(String(val).replace(',', '.'));
+        if (!isNaN(n) && n > 0)
+            return { record: n, isAutoRecord: key === 'mobileStartRecord' };
     }
-    return { ennatys: 0, isAutoRecord: 0 };
+    return { record: null, isAutoRecord: false };
 }
 
-function parsePeliP(r) {
-    // MATLAB: peliP = str2double(pMatch{1}) / 100
-    // JSON: betPercentages.KAK.percentage = 1148 → /100 = 11.48%
-    const pct = r.betPercentages?.KAK?.percentage ?? 0;
-    return parseFloat(pct) / 100;
+function parseBettingPct(runner) {
+    return parseFloat(runner.betPercentages?.KAK?.percentage ?? 0) / 100;
 }
 
-function parseVoittoP(r) {
-    // MATLAB: statBlock → total.starts / total.position1
-    // App.jsx käyttää myös total.winningPercent suoraan jos saatavilla
-    const total = r.stats?.total;
+function parseWinPct(runner) {
+    const total = runner.stats?.total;
     if (!total) return 0;
     if (total.winningPercent != null) return parseFloat(total.winningPercent);
     if (total.starts > 0) return Math.round((total.position1 / total.starts) * 10000) / 100;
     return 0;
 }
 
-function parseSukupuoli(g) {
-    if (g === 'TAMMA') return 1;
-    if (g === 'ORI')   return 3;
-    return 2; // RUUNA tai tuntematon
+function encodeGender(g) {
+    if (g === 'TAMMA') return 'M';   // Mare
+    if (g === 'ORI')   return 'S';   // Stallion
+    return 'G';                       // Gelding
 }
 
-function parseKmTime(kmRaw) {
-    // MATLAB: histIsAuto = ~isempty(strfind(kmRaw,'a')), isLaukka = ~isempty(strfind(kmRaw,'x'))
-    // kmNum = str2double(strrep(regexp(kmRaw,'[\d,]+','match','once'),',','.'))
-    if (!kmRaw) return { kmNum: 0, histIsAuto: 0, isLaukka: 0, display: '' };
-    const s        = String(kmRaw);
-    const histIsAuto = s.includes('a') ? 1 : 0;
-    const isLaukka   = s.includes('x') ? 1 : 0;
-    const numStr   = s.match(/[\d,]+/)?.[0] || '';
-    const kmNum    = parseFloat(numStr.replace(',', '.')) || 0;
-    const suffix   = isLaukka ? 'x' : histIsAuto ? 'a' : '';
-    const display  = kmNum > 0 ? kmNum.toFixed(2) + suffix : '';
-    return { kmNum, histIsAuto, isLaukka, display };
+// Parse raw km-time string: "15,5a" → { kmNum: 15.5, isCarStart: true, isBreak: false }
+function parseKmTime(raw) {
+    if (!raw) return { kmNum: 0, isCarStart: false, isBreak: false, display: '' };
+    const s          = String(raw);
+    const isCarStart = s.includes('a');
+    const isBreak    = s.includes('x');
+    const numStr     = s.match(/[\d,]+/)?.[0] || '';
+    const kmNum      = parseFloat(numStr.replace(',', '.')) || 0;
+    const suffix     = isBreak ? 'x' : isCarStart ? 'a' : '';
+    return { kmNum, isCarStart, isBreak, display: kmNum > 0 ? kmNum.toFixed(2) + suffix : '' };
 }
 
-function parseSijoitus(result) {
-    // MATLAB: isHyl=regexp(sijRaw,'[hdp]'), isKesk=strfind(sijRaw,'k')
-    if (!result) return { sijNum: 10, isHyl: 0, isKesk: 0 };
-    const s      = String(result).toLowerCase();
-    const isHyl  = /[hdp]/.test(s) ? 1 : 0;
-    const isKesk = s.includes('k') ? 1 : 0;
-    const m      = s.match(/^\d+/);
-    let sijNum = 10;
-    if (m)           sijNum = parseInt(m[0]);
-    else if (isHyl)  sijNum = 20;
-    else if (isKesk) sijNum = 21;
-    return { sijNum, isHyl, isKesk };
+// Parse finishing position: "4" → 4, "hyl" → 20, "k" → 21
+function parsePosition(result) {
+    if (!result) return { position: null, disqualified: false, DNF: false };
+    const s            = String(result).toLowerCase();
+    const disqualified = /[hdp]/.test(s);
+    const DNF          = s.includes('k');
+    const m            = s.match(/^\d+/);
+    let position       = null;
+    if (m)             position = parseInt(m[0]);
+    else if (disqualified) position = 20;
+    else if (DNF)      position = 21;
+    return { position, disqualified, DNF };
 }
 
-function fmtSij(n) {
-    if (n === 20) return 'Hyl';
-    if (n === 21) return 'Kesk';
-    if (n === 10 || n === 0) return '—';
-    return String(n);
-}
+// ─── ROW BUILDER ──────────────────────────────────────────────────────────────
+// Builds a flat row array from the Veikkaus API runner objects.
+// One row per prior start; runners with no history get one placeholder row.
 
-// ─────────────────────────────────────────────────────────────────────────────
-// buildRows — rakentaa flat CSV-tyyliset rivit JSON-datasta
-// Vastaa täsmälleen MATLAB-scraperin KaikkiData-taulukkoa
-// ─────────────────────────────────────────────────────────────────────────────
 function buildRows(runnersArr, raceInfo) {
-    const rows = [];
-
-    // raceInfo tulee races-endpointista (sama kuin App.jsx:n lahdot-array)
-    const currDist   = raceInfo?.distance   || '';
-    const currIsAuto = (raceInfo?.startType === 'CAR_START') ? 1 : 0;
-    const currDate   = ''; // meetDate tulee card-endpointista — jätetään tyhjäksi modalissa
+    const rows       = [];
+    const raceDistStr = raceInfo?.distance   || '';
+    const isCarStart  = raceInfo?.startType === 'CAR_START';
 
     for (const r of runnersArr) {
-        const { ennatys, isAutoRecord } = parseEnnatys(r);
+        const { record, isAutoRecord } = parseRecord(r);
 
-        // prevIndeksiNorm
-        const _prevAll = r.prevStarts || r.priorStarts || [];
-        let _prevIndeksiNorm = 0;
-        { let ind = 0, n = 0;
-            _prevAll.forEach(h => {
-                const s = String(h.result || ''), m = s.match(/^\d+/);
-                if (!m) return; const sij = parseInt(m[0]);
-                if (sij < 1 || sij > 16) return; n++;
-                if (sij===1) ind+=1.00; else if (sij===2) ind+=0.50; else if (sij===3) ind+=0.33;
-            });
-            _prevIndeksiNorm = n > 0 ? ind / n : 0;
+        // Weighted podium index normalised by ALL starts (disq/DNF count as 0 pts).
+        // Matches the prevIndexNorm feature in ravimalli.js / korrelaatioanalyysi_v2.m.
+        let prevIndexNorm = 0;
+        const allPrev = r.prevStarts || [];
+        if (allPrev.length > 0) {
+            let score = 0, count = 0;
+            for (const ps of allPrev) {
+                const { position } = parsePosition(ps.result);
+                if (position === null) continue;
+                count++;                          // disq/DNF → 0 pts, still counted
+                if      (position === 1) score += 1.00;
+                else if (position === 2) score += 0.50;
+                else if (position === 3) score += 0.33;
+            }
+            prevIndexNorm = count > 0 ? score / count : 0;
         }
 
+        // Static fields shared across all rows for this runner
         const base = {
-            Nro:                  r.startNumber             || '',
-            Nimi:                 r.horseName               || '',
-            Valmentaja:           r.coachName               || '',
-            Current_Ohjastaja:    r.driverName              || '',
-            Ika:                  r.horseAge                || '',
-            Sukupuoli:            (['T','1',1].includes(parseSukupuoli(r.gender)) ? 'T' :
-                parseSukupuoli(r.gender) === 3 ? 'O' : 'R'),
-            Is_Suomenhevonen:     (r.breed === 'K' || r.breed === 'FINNHORSE') ? '✓' : '',
-            Kengat_Etu:           fmtKengat(r.frontShoes),
-            Kengat_Taka:          fmtKengat(r.rearShoes),
-            Kengat_etu_changed:   r.frontShoesChanged  ? '↑' : '',
-            Kengat_taka_changed:  r.rearShoesChanged   ? '↑' : '',
-            Current_Special_Cart: fmtCart(r.specialCart),
-            Current_Distance:     currDist,
-            Current_Is_Auto:      currIsAuto ? '✓' : '',
-            Current_Start_Date:   currDate,
-            Peli_pros:            parsePeliP(r) > 0 ? parsePeliP(r).toFixed(2) + '%' : '—',
-            Voitto_pros:          parseVoittoP(r) > 0 ? parseVoittoP(r).toFixed(1) + '%' : '—',
-            Ennatys_nro:          ennatys > 0 ? ennatys.toFixed(2) : '—',
-            Is_Auto_Record:       isAutoRecord ? '✓' : '',
-            PrevIndeksiNorm:      _prevIndeksiNorm > 0 ? _prevIndeksiNorm.toFixed(3) : '—',
+            number:        r.startNumber              || '',
+            name:          r.horseName                || '',
+            coach:         r.coachName                || '',
+            driver:        r.driverName               || '',
+            age:           r.horseAge                 || '',
+            gender:        encodeGender(r.gender),
+            isColdBlood:   (r.breed === 'K' || r.breed === 'FINNHORSE') ? '✓' : '',
+            frontShoes:    fmtShoes(r.frontShoes),
+            rearShoes:     fmtShoes(r.rearShoes),
+            frontShoeChg:  r.frontShoesChanged ? '↑' : '',
+            rearShoeChg:   r.rearShoesChanged  ? '↑' : '',
+            specialCart:   fmtCart(r.specialCart),
+            distance:      raceDistStr,
+            isCarStart:    isCarStart ? '✓' : '',
+            bettingPct:    parseBettingPct(r) > 0 ? parseBettingPct(r).toFixed(2) + '%' : '—',
+            winPct:        parseWinPct(r)     > 0 ? parseWinPct(r).toFixed(1)     + '%' : '—',
+            record:        record             != null ? record.toFixed(2)              : '—',
+            isAutoRecord:  isAutoRecord ? '✓' : '',
+            prevIndexNorm: prevIndexNorm > 0 ? prevIndexNorm.toFixed(3) : 0,
         };
 
-        // KRIITTINEN: JSON:issa historia on "prevStarts" — EI "priorStarts"!
-        const prevStarts = r.prevStarts || r.priorStarts || [];
-
-        if (prevStarts.length === 0) {
-            rows.push({ ...base,
-                Hist_PVM: '', Ohjastaja: '', Rata: '', Matka: '', RataNro: '',
-                Km_aika: '', Hist_kengat_etu: '', Hist_kengat_taka: '',
-                Hist_Special_Cart: '', Hist_Is_Auto: '', Laukka: '',
-                Hylatty: '', Keskeytys: '', Track_Condition: '',
-                Hist_Sij: '', _sijNum: 10, _isLaukka: 0, _isHyl: 0,
-                Kerroin: '—', Palkinto: '—', _palkinto: 0,
+        if (allPrev.length === 0) {
+            rows.push({
+                ...base,
+                // History fields empty
+                _histDate: '', driver: base.driver, track: '', distance: '',
+                startPos: '', kmTime: '', frontShoes: '', rearShoes: '',
+                specialCart: '', isCarStart: '', break: '', disqualified: '',
+                DNF: '', trackCondition: '', position: '', odd: '', prize: '',
+                // Internal sort/colour helpers
+                _position: null, _isBreak: false, _isDisq: false, _palkinto: 0,
             });
         } else {
-            for (const h of prevStarts) {
-                const { kmNum, histIsAuto, isLaukka, display } = parseKmTime(h.kmTime);
-                const { sijNum, isHyl, isKesk }                = parseSijoitus(h.result);
+            for (const ps of allPrev) {
+                const { kmNum, isCarStart: psIsCarStart, isBreak, display } = parseKmTime(ps.kmTime);
+                const { position, disqualified, DNF }                        = parsePosition(ps.result);
 
-                // MATLAB: winOdd / 10  ("103" → 10.3)
-                const kerroin  = parseFloat(h.winOdd || 0) / 10;
-                // MATLAB: firstPrize / 100  — mutta JSON:issa arvo on senttejä×10
-                // JSON firstPrize=1000000, CSV palkinto=100 → jaetaan /10000
-                const palkinto = parseFloat(h.firstPrize || 0) / 10000;
+                // winOdd is ×10 in Veikkaus API (e.g. 152 = 15.2)
+                const odd    = parseFloat(ps.winOdd    || 0) / 10;
+                // firstPrize is in cents×10 (e.g. 1 000 000 = 100 €)
+                const prize  = parseFloat(ps.firstPrize || 0) / 10000;
 
-                rows.push({ ...base,
-                    Hist_PVM:          h.shortMeetDate        || '',
-                    Ohjastaja:         h.driverFullName || h.driver || '',
-                    Rata:              h.trackCode             || '',
-                    Matka:             h.distance              || '',
-                    RataNro:           h.startTrack            || '',
-                    Km_aika:           display,
-                    Hist_kengat_etu:   fmtKengat(h.frontShoes),
-                    Hist_kengat_taka:  fmtKengat(h.rearShoes),
-                    Hist_Special_Cart: fmtCart(h.specialCart),
-                    Hist_Is_Auto:      histIsAuto ? '✓' : '',
-                    Laukka:            isLaukka   ? '✗' : '',
-                    Hylatty:           isHyl      ? '✗' : '',
-                    Keskeytys:         isKesk     ? '✗' : '',
-                    // trackCondition EI ole tässä runners-endpointissa
-                    Track_Condition:   h.trackCondition || '',
-                    Hist_Sij:          fmtSij(sijNum),
-                    _sijNum:           sijNum,
-                    _isLaukka:         isLaukka,
-                    _isHyl:            isHyl,
-                    Kerroin:           kerroin  > 0 ? kerroin.toFixed(1)                       : '—',
-                    Palkinto:          palkinto > 0 ? Math.round(palkinto).toLocaleString('fi-FI') : '—',
-                    _palkinto:         palkinto,
+                rows.push({
+                    // Static fields
+                    ...base,
+                    // History fields (override keys that exist in both)
+                    _histDate:     ps.shortMeetDate || '',
+                    _histDriver:   ps.driverFullName || ps.driver || '',
+                    track:         ps.trackCode     || '',
+                    _histDistance: ps.distance      || '',
+                    startPos:      ps.startTrack    || '',
+                    kmTime:        display,
+                    _histFrontShoes: fmtShoes(ps.frontShoes),
+                    _histRearShoes:  fmtShoes(ps.rearShoes),
+                    _histSpecialCart: fmtCart(ps.specialCart),
+                    _histIsCarStart: psIsCarStart ? '✓' : '',
+                    break:         isBreak      ? '✗' : '',
+                    disqualified:  disqualified ? '✗' : '',
+                    DNF:           DNF          ? '✗' : '',
+                    trackCondition: ps.trackCondition || '',
+                    position:      fmtPosition(position),
+                    odd:           odd   > 0 ? odd.toFixed(1)                          : '—',
+                    prize:         prize > 0 ? Math.round(prize).toLocaleString('fi-FI') : '—',
+                    // Internal helpers
+                    _position:     position,
+                    _isBreak:      isBreak,
+                    _isDisq:       disqualified,
+                    _palkinto:     prize,
                 });
             }
         }
@@ -238,62 +232,60 @@ function buildRows(runnersArr, raceInfo) {
     return rows;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Värikoodaus
-// ─────────────────────────────────────────────────────────────────────────────
-function getColor(colKey, row) {
-    if (colKey === 'Nimi')    return '#e8eaf0';
-    if (colKey === 'Nro')     return '#c8a040';
-    if (colKey === 'Hist_Sij') {
-        if (row._sijNum === 1)               return '#f0a500';
-        if (row._sijNum === 2 || row._sijNum === 3) return '#4a90d9';
-        if (row._sijNum >= 20)               return '#e74c3c';
+// ─── CELL COLOUR ──────────────────────────────────────────────────────────────
+
+function cellColor(colKey, row) {
+    if (colKey === 'name')   return '#e8eaf0';
+    if (colKey === 'number') return '#c8a040';
+    if (colKey === 'position') {
+        if (row._position === 1)               return '#f0a500';
+        if (row._position === 2 || row._position === 3) return '#4a90d9';
+        if (row._position >= 20)               return '#e74c3c';
     }
-    if ((colKey === 'Laukka' || colKey === 'Hylatty' || colKey === 'Keskeytys') && row[colKey] === '✗')
+    if (['break', 'disqualified', 'DNF'].includes(colKey) && row[colKey] === '✗')
         return '#e74c3c';
-    if (colKey === 'Km_aika' && (row._isLaukka || row._isHyl))
+    if (colKey === 'kmTime' && (row._isBreak || row._isDisq))
         return '#e74c3c';
-    if (colKey === 'Palkinto' && row._palkinto > 0)
+    if (colKey === 'prize' && row._palkinto > 0)
         return '#2ecc71';
     if (HIST_COLS.find(c => c.key === colKey))
         return '#6a7a8a';
     return '#7a8a9a';
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Komponentti
-// ─────────────────────────────────────────────────────────────────────────────
+// ─── COMPONENT ────────────────────────────────────────────────────────────────
+
 export default function RunnerModal({ raceId, race, raceLabel, preloadedData, onClose }) {
     const [rows,    setRows]    = useState([]);
     const [loading, setLoading] = useState(true);
     const [error,   setError]   = useState('');
 
-    // ESC sulkee
+    // Close on Escape
     useEffect(() => {
-        const h = e => { if (e.key === 'Escape') onClose(); };
-        window.addEventListener('keydown', h);
-        return () => window.removeEventListener('keydown', h);
+        const handler = e => { if (e.key === 'Escape') onClose(); };
+        window.addEventListener('keydown', handler);
+        return () => window.removeEventListener('keydown', handler);
     }, [onClose]);
 
     useEffect(() => {
         if (!raceId) return;
 
-        // Jos App.jsx on jo hakenut datan ennustuksen yhteydessä — käytetään sitä
+        // Reuse data already fetched by App.jsx for the prediction — avoids a duplicate request
         if (preloadedData?.raw) {
             try {
                 const raw = preloadedData.raw;
                 const arr = Array.isArray(raw)
                     ? raw
                     : (raw.collection || raw.runners || raw.data || Object.values(raw));
-                const filtered = arr.filter(r => r.scratched !== true);
-                console.log('[modal] preloaded', filtered.length, 'hevosta | prevStarts[0]:', filtered[0]?.prevStarts?.length);
-                setRows(buildRows(filtered, preloadedData.race || race));
-            } catch(e) { setError(e.message); }
-            finally { setLoading(false); }
+                const starters = arr.filter(r => r.scratched !== true);
+                console.log('[modal] preloaded', starters.length, 'runners');
+                setRows(buildRows(starters, preloadedData.race || race));
+            } catch (e) { setError(e.message); }
+            finally     { setLoading(false);   }
             return;
         }
 
-        // Fallback: hae itse (käytetään kun modal avataan ilman ennustusta)
+        // Fallback: fetch independently (modal opened before running prediction)
         setLoading(true); setError('');
         fetch(`/api-veikkaus/api/toto-info/v1/race/${raceId}/runners`)
             .then(r => r.json())
@@ -301,27 +293,26 @@ export default function RunnerModal({ raceId, race, raceLabel, preloadedData, on
                 const arr = Array.isArray(raw)
                     ? raw
                     : (raw.collection || raw.runners || raw.data || Object.values(raw));
-                const filtered = arr.filter(r => r.scratched !== true);
-                console.log('[modal] fetched', filtered.length, 'hevosta | prevStarts[0]:', filtered[0]?.prevStarts?.length);
-                setRows(buildRows(filtered, race));
+                const starters = arr.filter(r => r.scratched !== true);
+                console.log('[modal] fetched', starters.length, 'runners');
+                setRows(buildRows(starters, race));
             })
-            .catch(e => setError(e.message))
-            .finally(() => setLoading(false));
+            .catch(e  => setError(e.message))
+            .finally(  () => setLoading(false));
     }, [raceId, preloadedData]);
 
-    // Hevosittain vuorottelevat taustavärit
+    // Assign alternating background per horse (zebra striping across history rows)
     const horseOrder = [];
     const seen = {};
-    rows.forEach(r => { if (!seen[r.Nimi]) { seen[r.Nimi] = true; horseOrder.push(r.Nimi); } });
-    const horseIdx = {};
-    horseOrder.forEach((n, i) => horseIdx[n] = i);
+    rows.forEach(r => { if (!seen[r.name]) { seen[r.name] = true; horseOrder.push(r.name); } });
+    const horseIndex = Object.fromEntries(horseOrder.map((n, i) => [n, i]));
 
     const bgStatic = ['#0d1018', '#0f1320'];
     const bgHist   = ['#08090f', '#090c15'];
 
-    const TH = (hist) => ({
+    const thStyle = isHist => ({
         position: 'sticky', top: 0, zIndex: 2,
-        background: hist ? '#06070c' : '#07090e',
+        background: isHist ? '#06070c' : '#07090e',
         color: '#3a6090', fontWeight: 700, fontSize: 10.5,
         letterSpacing: 1.2, textTransform: 'uppercase',
         padding: '6px 9px', whiteSpace: 'nowrap',
@@ -329,7 +320,14 @@ export default function RunnerModal({ raceId, race, raceLabel, preloadedData, on
         fontFamily: "'IBM Plex Mono','Courier New',monospace",
     });
 
-    const uniq = horseOrder.length;
+    // Resolve display value — hist columns use _hist-prefixed keys to avoid
+    // collision with static columns that share names (driver, distance, etc.)
+    const resolveCell = (colKey, row) => {
+        const histKey = `_hist${colKey.charAt(0).toUpperCase()}${colKey.slice(1)}`;
+        if (HIST_COLS.find(c => c.key === colKey) && histKey in row)
+            return String(row[histKey] ?? '');
+        return String(row[colKey] ?? '');
+    };
 
     return (
         <div style={{
@@ -338,17 +336,17 @@ export default function RunnerModal({ raceId, race, raceLabel, preloadedData, on
             display: 'flex', flexDirection: 'column',
             fontFamily: "'IBM Plex Mono','Courier New',monospace",
         }}>
-            {/* Topbar */}
+            {/* Top bar */}
             <div style={{
                 display: 'flex', alignItems: 'center', gap: 14, flexShrink: 0,
                 padding: '8px 14px', background: '#07090e',
                 borderBottom: '1px solid #151c28',
             }}>
-        <span style={{ fontSize: 10, letterSpacing: 3, color: '#3a6090', textTransform: 'uppercase' }}>
-          LÄHTÖTIEDOT
-        </span>
+                <span style={{ fontSize: 10, letterSpacing: 3, color: '#3a6090', textTransform: 'uppercase' }}>
+                    Race details
+                </span>
                 <span style={{ fontSize: 13, fontWeight: 700, color: '#e8eaf0' }}>{raceLabel}</span>
-                <span style={{ marginLeft: 'auto', fontSize: 10, color: '#334' }}>ESC sulkee</span>
+                <span style={{ marginLeft: 'auto', fontSize: 10, color: '#334' }}>ESC to close</span>
                 <button onClick={onClose} style={{
                     background: 'none', border: '1px solid #1e2c40', color: '#ccd',
                     borderRadius: 4, padding: '2px 11px', fontFamily: 'inherit',
@@ -356,13 +354,12 @@ export default function RunnerModal({ raceId, race, raceLabel, preloadedData, on
                 }}>✕</button>
             </div>
 
-            {/* Taulukko */}
+            {/* Table */}
             <div style={{ flex: 1, overflow: 'auto' }}>
-                {loading && <div style={{ padding: 40, color: '#4a90d9', fontSize: 13 }}>Ladataan…</div>}
+                {loading && <div style={{ padding: 40, color: '#4a90d9', fontSize: 13 }}>Loading…</div>}
                 {error   && <div style={{ padding: 40, color: '#e74c3c', fontSize: 13 }}>✗ {error}</div>}
-
                 {!loading && !error && rows.length === 0 && (
-                    <div style={{ padding: 40, color: '#664', fontSize: 13 }}>Ei dataa</div>
+                    <div style={{ padding: 40, color: '#664', fontSize: 13 }}>No data</div>
                 )}
 
                 {!loading && !error && rows.length > 0 && (
@@ -370,19 +367,18 @@ export default function RunnerModal({ raceId, race, raceLabel, preloadedData, on
                         <thead>
                         <tr>
                             {STATIC_COLS.map(c => (
-                                <th key={c.key} style={{ ...TH(false), minWidth: c.w }}>{c.label}</th>
+                                <th key={c.key} style={{ ...thStyle(false), minWidth: c.w }}>{c.label}</th>
                             ))}
-                            {/* Erotin */}
-                            <th style={{ ...TH(true), color: '#111', padding: '6px 2px', minWidth: 6 }}>│</th>
+                            <th style={{ ...thStyle(true), color: '#111', padding: '6px 2px', minWidth: 6 }}>│</th>
                             {HIST_COLS.map(c => (
-                                <th key={c.key} style={{ ...TH(true), minWidth: c.w }}>{c.label}</th>
+                                <th key={c.key} style={{ ...thStyle(true), minWidth: c.w }}>{c.label}</th>
                             ))}
                         </tr>
                         </thead>
                         <tbody>
                         {rows.map((row, i) => {
-                            const hi      = horseIdx[row.Nimi] ?? 0;
-                            const newHorse = i === 0 || rows[i-1]?.Nimi !== row.Nimi;
+                            const hi       = horseIndex[row.name] ?? 0;
+                            const newHorse = i === 0 || rows[i - 1]?.name !== row.name;
                             const tdS = {
                                 padding: '4px 9px', whiteSpace: 'nowrap', fontSize: 11.5,
                                 fontFamily: "'IBM Plex Mono','Courier New',monospace",
@@ -396,19 +392,19 @@ export default function RunnerModal({ raceId, race, raceLabel, preloadedData, on
                                     {STATIC_COLS.map(c => (
                                         <td key={c.key} style={{
                                             ...tdS, minWidth: c.w,
-                                            color: getColor(c.key, row),
-                                            fontWeight: c.key === 'Nimi' ? 600 : 400,
+                                            color:      cellColor(c.key, row),
+                                            fontWeight: c.key === 'name' ? 600 : 400,
                                         }}>
-                                            {String(row[c.key] ?? '')}
+                                            {resolveCell(c.key, row)}
                                         </td>
                                     ))}
                                     <td style={{ ...tdH, color: '#111', padding: '4px 2px' }}>│</td>
                                     {HIST_COLS.map(c => (
                                         <td key={c.key} style={{
                                             ...tdH, minWidth: c.w,
-                                            color: getColor(c.key, row),
+                                            color: cellColor(c.key, row),
                                         }}>
-                                            {String(row[c.key] ?? '')}
+                                            {resolveCell(c.key, row)}
                                         </td>
                                     ))}
                                 </tr>
@@ -426,7 +422,7 @@ export default function RunnerModal({ raceId, race, raceLabel, preloadedData, on
                     borderTop: '1px solid #151c28',
                     fontSize: 10, color: '#2a3a4a', flexShrink: 0,
                 }}>
-                    {rows.length} riviä · {uniq} hevosta
+                    {rows.length} rows · {horseOrder.length} runners
                 </div>
             )}
         </div>
