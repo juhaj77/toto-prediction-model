@@ -27,16 +27,16 @@ const STATIC_COLS = [
 ];
 
 const HIST_COLS = [
-    { key: 'date',             label: 'Date',         w: 86  },
-    { key: 'driver',           label: 'Driver',       w: 140 },
+    { key: 'histDate',         label: 'Date',         w: 86  },
+    { key: 'histDriver',        label: 'H.Driver',     w: 140 },
     { key: 'track',            label: 'Track',        w: 46  },
-    { key: 'distance',         label: 'Dist',         w: 56  },
+    { key: 'histDistance',     label: 'Dist',         w: 56  },
     { key: 'startPos',         label: 'StartPos',     w: 60  },
     { key: 'kmTime',           label: 'km/min',       w: 72  },
-    { key: 'frontShoes',       label: 'F.Shoe',       w: 58  },
-    { key: 'rearShoes',        label: 'R.Shoe',       w: 58  },
-    { key: 'specialCart',      label: 'Cart',         w: 46  },
-    { key: 'isCarStart',       label: 'Car',          w: 40  },
+    { key: 'histFrontShoes',   label: 'F.Shoe',       w: 58  },
+    { key: 'histRearShoes',    label: 'R.Shoe',       w: 58  },
+    { key: 'histSpecialCart',  label: 'Cart',         w: 46  },
+    { key: 'histIsCarStart',   label: 'Car',          w: 40  },
     { key: 'break',            label: 'Break',        w: 50  },
     { key: 'disqualified',     label: 'Disq',         w: 40  },
     { key: 'DNF',              label: 'DNF',          w: 46  },
@@ -182,10 +182,11 @@ function buildRows(runnersArr, raceInfo) {
             rows.push({
                 ...base,
                 // History fields empty
-                _histDate: '', driver: base.driver, track: '', distance: '',
-                startPos: '', kmTime: '', frontShoes: '', rearShoes: '',
-                specialCart: '', isCarStart: '', break: '', disqualified: '',
-                DNF: '', trackCondition: '', position: '', odd: '', prize: '',
+                histDate: '', histDriver: '', track: '',
+                histDistance: '', startPos: '', kmTime: '',
+                histFrontShoes: '', histRearShoes: '', histSpecialCart: '', histIsCarStart: '',
+                break: '', disqualified: '', DNF: '',
+                trackCondition: '', position: '', odd: '', prize: '',
                 // Internal sort/colour helpers
                 _position: null, _isBreak: false, _isDisq: false, _palkinto: 0,
             });
@@ -203,16 +204,16 @@ function buildRows(runnersArr, raceInfo) {
                     // Static fields
                     ...base,
                     // History fields (override keys that exist in both)
-                    _histDate:     ps.shortMeetDate || '',
-                    _histDriver:   ps.driverFullName || ps.driver || '',
+                    histDate:     ps.shortMeetDate || '',
+                    histDriver:    ps.driverFullName || ps.driver || '',
                     track:         ps.trackCode     || '',
-                    _histDistance: ps.distance      || '',
+                    histDistance: ps.distance      || '',
                     startPos:      ps.startTrack    || '',
                     kmTime:        display,
-                    _histFrontShoes: fmtShoes(ps.frontShoes),
-                    _histRearShoes:  fmtShoes(ps.rearShoes),
-                    _histSpecialCart: fmtCart(ps.specialCart),
-                    _histIsCarStart: psIsCarStart ? '✓' : '',
+                    histFrontShoes: fmtShoes(ps.frontShoes),
+                    histRearShoes:  fmtShoes(ps.rearShoes),
+                    histSpecialCart: fmtCart(ps.specialCart),
+                    histIsCarStart: psIsCarStart ? '✓' : '',
                     break:         isBreak      ? '✗' : '',
                     disqualified:  disqualified ? '✗' : '',
                     DNF:           DNF          ? '✗' : '',
@@ -320,14 +321,10 @@ export default function RunnerModal({ raceId, race, raceLabel, preloadedData, on
         fontFamily: "'IBM Plex Mono','Courier New',monospace",
     });
 
-    // Resolve display value — hist columns use _hist-prefixed keys to avoid
-    // collision with static columns that share names (driver, distance, etc.)
-    const resolveCell = (colKey, row) => {
-        const histKey = `_hist${colKey.charAt(0).toUpperCase()}${colKey.slice(1)}`;
-        if (HIST_COLS.find(c => c.key === colKey) && histKey in row)
-            return String(row[histKey] ?? '');
-        return String(row[colKey] ?? '');
-    };
+    // Resolve display value.
+    // History columns use _hist-prefixed keys to avoid collision with static
+    // columns that share the same name (driver, distance, frontShoes, etc.).
+    const resolveCell = (colKey, row) => String(row[colKey] ?? '');
 
     return (
         <div style={{
