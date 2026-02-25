@@ -477,7 +477,7 @@ async function runTraining() {
 
 // ─── PREDICTION ───────────────────────────────────────────────────────────────
 /*
-This should return the data for a single race in JSON format
+predictionFile should be the data for a single race in JSON format
 (structured the same way as the training data).
 This function is a leftover from the prototyping phase,
 when the front-end was not yet handling the prediction logic.
