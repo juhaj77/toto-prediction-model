@@ -507,9 +507,14 @@ export default function App() {
                     <div style={{ fontSize: 11, letterSpacing: 4, color: '#4a90d9', textTransform: 'uppercase', marginBottom: 6 }}>
                         Toto Prediction System
                     </div>
-                    <h1 style={{ margin: 0, fontSize: 26, fontWeight: 700, color: '#fff', letterSpacing: -0.5 }}>
-                        RaviMalli v5
-                    </h1>
+                    <div style={{ display: 'flex', alignItems: 'baseline', gap: 14 }}>
+                        <h1 style={{ margin: 0, fontSize: 26, fontWeight: 700, color: '#fff', letterSpacing: -0.5 }}>
+                            RaviMalli v5
+                        </h1>
+                        <span style={{ fontSize: 13, color: '#486388', letterSpacing: 0.5 }}>
+                            Mixed model: LSTM (history branch) + Dense (static branch)
+                        </span>
+                    </div>
 
                     <div style={{ marginTop: 10, display: 'flex', flexWrap: 'wrap', gap: 16, alignItems: 'center', fontSize: 12 }}>
                         <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
