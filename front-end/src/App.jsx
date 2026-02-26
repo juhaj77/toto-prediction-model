@@ -51,6 +51,21 @@ function parsePosition(result) {
     return { position, disqualified, DNF };
 }
 
+// Detect cold blood breed (Finnhorse) from sire/dam pedigree strings.
+// Warmblood pedigree entries carry a country code suffix like "Make It Happen* (US)".
+// Finnhorse entries have no country code. Falls back to false if both fields are empty.
+function detectColdBlood(raceInfo, runnerSample) {
+    // Prefer explicit breed field if the races endpoint provides it
+    if (raceInfo?.breed === 'K' || raceInfo?.breed === 'FINNHORSE') return true;
+    if (raceInfo?.breed && raceInfo.breed !== '') return false;
+    // Fallback: inspect sire/dam of the first non-scratched runner
+    if (!runnerSample) return false;
+    const sire = runnerSample.sire || '';
+    const dam  = runnerSample.dam  || '';
+    if (!sire && !dam) return false;
+    return !/\([A-Z]{2}\)/.test(sire) && !/\([A-Z]{2}\)/.test(dam);
+}
+
 // Gender code → numeric (1 = mare, 2 = gelding, 3 = stallion)
 function encodeGender(g) {
     if (g === 'TAMMA') return 1;
@@ -133,12 +148,17 @@ function buildFeatures(runners, maps, raceDate, raceDistance, isColdBlood, isCar
     const means = { SH: { record: 28.0, km: 29.0 }, LV: { record: 15.0, km: 16.0 } };
 
     // Look up a stable integer ID from the training-time name maps.
-    // Unknown names fall back to 0 (same behaviour as ravimalli.js prediction mode).
+    // Supports both new key names (coaches/drivers/tracks) and legacy Finnish names
+    // (valmentajat/ohjastajat/radat) so existing mappings.json files still work.
     const getID = (map, name, type) => {
         if (!name || name === 'Unknown' || name === '') return 0;
         const key = (type === 'driver') ? extractSurname(name) : name.trim().toLowerCase();
         return map[key] || 0;
     };
+
+    const coachMap  = maps.coaches      || maps.valmentajat || {};
+    const driverMap = maps.drivers      || maps.ohjastajat  || {};
+    const trackMap  = maps.tracks       || maps.radat       || {};
 
     // Per-race relative rank is more informative than the raw percentage value
     const starters      = runners.filter(r => !r.scratched);
@@ -203,9 +223,9 @@ function buildFeatures(runners, maps, raceDate, raceDistance, isColdBlood, isCar
         // ── Static features — 27 total, same order as ravimalli.js ──────────
         const staticFeats = [
             (runner.number || 1) / 20,                                        // [0]  start number
-            getID(maps.coaches, runner.coach,  'coach')  / 2000,              // [1]  coach ID
+            getID(coachMap,  runner.coach,  'coach')  / 2000,              // [1]  coach ID
             (runner.record || means[breed].record) / 50,                      // [2]  race record
-            getID(maps.drivers, runner.driver, 'driver') / 3000,              // [3]  driver ID
+            getID(driverMap, runner.driver, 'driver') / 3000,              // [3]  driver ID
             (runner.age || 5) / 15,                                           // [4]  age
             (runner.gender || 2) / 3,                                         // [5]  gender
             isColdBlood ? 1 : 0,                                              // [6]  cold blood breed
@@ -275,8 +295,8 @@ function buildFeatures(runners, maps, raceDate, raceDistance, isColdBlood, isCar
                 psIsCarStart ? 1 : 0,                                          // [11]    car start
                 isBreak      ? 1 : 0,                                          // [12]    gait fault
                 (ps.startTrack ?? 1) / 30,                                     // [13]    start position
-                getID(maps.drivers, ps.driverFullName || ps.driver, 'driver') / 3000, // [14] driver ID
-                getID(maps.tracks,  ps.trackCode || ps.track, 'track') / 500,  // [15]    track ID
+                getID(driverMap, ps.driverFullName || ps.driver, 'driver') / 3000, // [14] driver ID
+                getID(trackMap,  ps.trackCode || ps.track, 'track') / 500,  // [15]    track ID
                 disqualified ? 1 : 0,                                          // [16]    disqualified
                 DNF          ? 1 : 0,                                          // [17]    did not finish
                 psfront === 'HAS_SHOES' ? 1 : 0,                               // [18]    front shoes on
@@ -400,11 +420,9 @@ export default function App() {
 
             const raceId      = String(raceInfo.raceId || raceInfo.id);
             const raceDistance = parseInt(raceInfo.distance || 2100);
-            const isColdBlood  = (raceInfo.breed === 'K' || raceInfo.breed === 'FINNHORSE');
             const isCarStart   = (raceInfo.startType === 'CAR_START' || raceInfo.startType === 'AUTO');
 
             const runnersRaw = await fetch(`/api-veikkaus/api/toto-info/v1/race/${raceId}/runners`).then(r => r.json());
-            setModalRunners({ raw: runnersRaw, race: raceInfo });
 
             const runnersArr = Array.isArray(runnersRaw)
                 ? runnersRaw
@@ -412,6 +430,8 @@ export default function App() {
 
             console.log('[runners] API response keys:', Object.keys(runnersRaw));
             console.log('[runners] Found', runnersArr.length, 'entries before filter');
+            const isColdBlood  = detectColdBlood(raceInfo, runnersArr[0]);
+            setModalRunners({ raw: runnersRaw, race: raceInfo, isColdBlood });
 
             // Normalise runner objects to internal shape
             const runners = runnersArr
@@ -472,14 +492,6 @@ export default function App() {
         }
     }, [selectedCard, selectedRace, model, maps, races]);
 
-    // Reset body margin (override Vite defaults)
-    useEffect(() => {
-        document.body.style.margin  = '0';
-        document.body.style.padding = '0';
-        document.body.style.width   = '100%';
-        document.documentElement.style.width = '100%';
-    }, []);
-
     const statusColor  = { idle: '#888', loading: '#f0a500', ready: '#2ecc71', error: '#e74c3c' };
     const statusLabel  = { idle: 'Idle', loading: 'Loading model…', ready: 'Model ready', error: 'Load error' };
     const canRun       = selectedRace && modelStatus === 'ready' && !loadingPred;
@@ -515,9 +527,9 @@ export default function App() {
                                 <span style={{ borderLeft: '1px solid #222', paddingLeft: 14 }}>
                                     Learning Data <b style={{ color: '#aaa' }}>{modelInfo.dataStartDate} → {modelInfo.dataEndDate}</b>
                                 </span>
-                                <span>races <b style={{ color: '#aaa' }}>{modelInfo.totalRaces?.toLocaleString('fi-FI')}</b></span>
+                                <span>races <b style={{ color: '#aaa' }}>{(modelInfo.totalRaces ?? modelInfo.totalRows)?.toLocaleString('fi-FI')}</b></span>
                                 <span style={{ color: '#333' }}>·</span>
-                                <span>runners <b style={{ color: '#aaa' }}>{modelInfo.totalRunners?.toLocaleString('fi-FI')}</b></span>
+                                <span>runners <b style={{ color: '#aaa' }}>{(modelInfo.totalRunners ?? modelInfo.totalStarts)?.toLocaleString('fi-FI')}</b></span>
                             </span>
                         )}
                     </div>
@@ -618,7 +630,9 @@ export default function App() {
                                     <tr key={p.name} style={{ borderBottom: '1px solid #12151c',
                                         background: i === 0 ? '#0d1a2a' : i % 2 === 0 ? '#0f1118' : 'transparent' }}>
                                         <td style={{ padding: '10px 12px', color: i < 3 ? '#f0a500' : '#444' }}>
-                                            {i < 3 ? ['①', '②', '③'][i] : `#${i + 1}`}
+                                            {i < 3
+                                                ? <span style={{ fontSize: 26, lineHeight: 1 }}>{['①', '②', '③'][i]}</span>
+                                                : `#${i + 1}`}
                                         </td>
                                         <td style={{ padding: '10px 12px', color: '#666' }}>{p.number}</td>
                                         <td style={{ padding: '10px 12px', fontWeight: 600 }}>{p.name}</td>

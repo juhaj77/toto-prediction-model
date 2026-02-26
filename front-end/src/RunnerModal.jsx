@@ -130,10 +130,10 @@ function parsePosition(result) {
 // Builds a flat row array from the Veikkaus API runner objects.
 // One row per prior start; runners with no history get one placeholder row.
 
-function buildRows(runnersArr, raceInfo) {
+function buildRows(runnersArr, raceInfo, isColdBlood = false) {
     const rows       = [];
     const raceDistStr = raceInfo?.distance   || '';
-    const isCarStart  = raceInfo?.startType === 'CAR_START';
+    const isCarStart  = raceInfo?.startType === 'CAR_START' || raceInfo?.startType === 'AUTO';
 
     for (const r of runnersArr) {
         const { record, isAutoRecord } = parseRecord(r);
@@ -163,7 +163,7 @@ function buildRows(runnersArr, raceInfo) {
             driver:        r.driverName               || '',
             age:           r.horseAge                 || '',
             gender:        encodeGender(r.gender),
-            isColdBlood:   (r.breed === 'K' || r.breed === 'FINNHORSE') ? '✓' : '',
+            isColdBlood:   isColdBlood ? '✓' : '',
             frontShoes:    fmtShoes(r.frontShoes),
             rearShoes:     fmtShoes(r.rearShoes),
             frontShoeChg:  r.frontShoesChanged ? '↑' : '',
@@ -175,7 +175,7 @@ function buildRows(runnersArr, raceInfo) {
             winPct:        parseWinPct(r)     > 0 ? parseWinPct(r).toFixed(1)     + '%' : '—',
             record:        record             != null ? record.toFixed(2)              : '—',
             isAutoRecord:  isAutoRecord ? '✓' : '',
-            prevIndexNorm: prevIndexNorm > 0 ? prevIndexNorm.toFixed(3) : 0,
+            prevIndexNorm: prevIndexNorm > 0 ? prevIndexNorm.toFixed(3) : '0',
         };
 
         if (allPrev.length === 0) {
@@ -254,6 +254,17 @@ function cellColor(colKey, row) {
     return '#7a8a9a';
 }
 
+// Detect cold blood (Finnhorse) from sire/dam — same logic as App.jsx.
+function detectColdBlood(raceInfo, runnerSample) {
+    if (raceInfo?.breed === 'K' || raceInfo?.breed === 'FINNHORSE') return true;
+    if (raceInfo?.breed && raceInfo.breed !== '') return false;
+    if (!runnerSample) return false;
+    const sire = runnerSample.sire || '';
+    const dam  = runnerSample.dam  || '';
+    if (!sire && !dam) return false;
+    return !/\([A-Z]{2}\)/.test(sire) && !/\([A-Z]{2}\)/.test(dam);
+}
+
 // ─── COMPONENT ────────────────────────────────────────────────────────────────
 
 export default function RunnerModal({ raceId, race, raceLabel, preloadedData, onClose }) {
@@ -278,9 +289,13 @@ export default function RunnerModal({ raceId, race, raceLabel, preloadedData, on
                 const arr = Array.isArray(raw)
                     ? raw
                     : (raw.collection || raw.runners || raw.data || Object.values(raw));
-                const starters = arr.filter(r => r.scratched !== true);
-                console.log('[modal] preloaded', starters.length, 'runners');
-                setRows(buildRows(starters, preloadedData.race || race));
+                const starters    = arr.filter(r => r.scratched !== true);
+                const raceInfo    = preloadedData.race || race;
+                // Use isColdBlood from preloadedData if App.jsx already resolved it,
+                // otherwise fall back to detecting from runners
+                const isColdBlood = preloadedData.isColdBlood ?? detectColdBlood(raceInfo, starters[0]);
+                console.log('[modal] preloaded', starters.length, 'runners, coldBlood:', isColdBlood);
+                setRows(buildRows(starters, raceInfo, isColdBlood));
             } catch (e) { setError(e.message); }
             finally     { setLoading(false);   }
             return;
@@ -294,9 +309,10 @@ export default function RunnerModal({ raceId, race, raceLabel, preloadedData, on
                 const arr = Array.isArray(raw)
                     ? raw
                     : (raw.collection || raw.runners || raw.data || Object.values(raw));
-                const starters = arr.filter(r => r.scratched !== true);
-                console.log('[modal] fetched', starters.length, 'runners');
-                setRows(buildRows(starters, race));
+                const starters    = arr.filter(r => r.scratched !== true);
+                const isColdBlood = detectColdBlood(race, starters[0]);
+                console.log('[modal] fetched', starters.length, 'runners, coldBlood:', isColdBlood);
+                setRows(buildRows(starters, race, isColdBlood));
             })
             .catch(e  => setError(e.message))
             .finally(  () => setLoading(false));
