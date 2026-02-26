@@ -1,4 +1,4 @@
-# Harness Racing Prediction Model
+# Toto Prediction Model
 
 A mixed neural network architecture combining **LSTM** and **Dense** layers.
 
