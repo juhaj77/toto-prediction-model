@@ -103,7 +103,7 @@ The limitation: the model has no awareness of the other horses in the race when 
 
 #### Target state: race-based model
 
-The model receives all runners in a race **as a single input** and evaluates them simultaneously. This enables learning of within-race relationships between horses.
+The model receives all runners in a race **as a single input** and evaluates them simultaneously. This enables learning of within-race relationships between horses. Currently, there is not enough data yet (currently ~1,800 races). At least 10,000 races are required.
 
 **New tensors:**
 
