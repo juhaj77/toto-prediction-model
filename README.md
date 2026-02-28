@@ -18,6 +18,11 @@ Training data is scraped from [Veikkaus](https://www.veikkaus.fi).
 
 ---
 
+## Install
+Run `npm install` in both `model-learning` and `front-end`.
+
+---
+
 ## Data Collection
 
 Race data is appended to:
