@@ -18,6 +18,10 @@ Training data is scraped from [Veikkaus](https://www.veikkaus.fi).
 
 ---
 
+## Install
+
+Run `npm install` in the `model-learning` and `front-end` folders.
+
 ## Data Collection
 
 Race data is appended to:
@@ -29,11 +33,6 @@ To build a sufficiently large training dataset, run the scraper periodically.
 
 ### Run the scraper
 
-From the `model-learning` directory:
-
-```bash
-node scraper
-```
 
 This appends new race data to `ravit_opetusdata.json`.
 
