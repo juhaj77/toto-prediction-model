@@ -13,7 +13,6 @@ Training data is scraped from [Veikkaus](https://www.veikkaus.fi).
 ## Project Structure
 
 - `model-learning/` – Data scraping and model training  
-- `ravimalli-mixed/` – Trained model artifacts  
 - `front-end/` – Prediction user interface  
 
 ---
