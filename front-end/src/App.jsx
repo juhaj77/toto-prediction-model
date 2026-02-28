@@ -115,10 +115,14 @@ function parseWinPct(runner) {
 
 // Track condition → 0–1 scale (0 = heaviest, 1 = lightest)
 function encodeTrackCondition(condition) {
-    switch ((condition || '').toLowerCase().trim()) {
+    switch ((String(condition ?? '')).toLowerCase().trim()) {
         case 'heavy track':       return 0.00;
+        case 'heavy':             return 0.00;
+        case 'sloppy':            return 0.10;
         case 'quite heavy track': return 0.25;
+        case 'good':              return 0.70;
         case 'winter track':      return 0.75;
+        case 'fast':              return 0.85;
         case 'light track':       return 1.00;
         default:                  return 0.50;
     }

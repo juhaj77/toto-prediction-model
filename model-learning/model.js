@@ -65,8 +65,12 @@ async function loadModel() {
 function encodeTrackCondition(condition) {
     switch ((String(condition ?? '')).toLowerCase().trim()) {
         case 'heavy track':       return 0.00;
+        case 'heavy':             return 0.00;
+        case 'sloppy':            return 0.10;
         case 'quite heavy track': return 0.25;
+        case 'good':              return 0.70;
         case 'winter track':      return 0.75;
+        case 'fast':              return 0.85;
         case 'light track':       return 1.00;
         default:                  return 0.50;
     }
@@ -444,7 +448,7 @@ async function runTraining() {
                     bestValLoss = logs.val_loss;
                     patienceCounter = 0;
                     lrPatienceCount = 0;
-                    console.log('   New best val_loss — saving...');
+                    console.log('   ⭐ New best val_loss — saving...');
                     await saveModel(model, {
                         epoch:         epoch + 1,
                         loss:          Math.round(logs.loss * 10000) / 10000,
@@ -458,7 +462,7 @@ async function runTraining() {
                     lrPatienceCount++;
                     if (lrPatienceCount >= LR_REDUCE_PATIENCE) {
                         model.optimizer.learningRate = lr * 0.5;
-                        console.log(`   Reducing LR: ${(lr * 0.5).toFixed(6)}`);
+                        console.log(`   📉 Reducing LR: ${(lr * 0.5).toFixed(6)}`);
                         lrPatienceCount = 0;
                     }
                     if (patienceCounter >= EARLY_STOP_PATIENCE) {
@@ -474,7 +478,141 @@ async function runTraining() {
     data.static.dispose();
     data.y.dispose();
 }
+function buildModel2(maxRunners, timeSteps, histFeatures, staticFeatures) {
+    // Inputs — race-based: outermost runner dimension groups horses per race
+    const histInput   = tf.input({ shape: [maxRunners, timeSteps, histFeatures], name: 'history_input' });
+    const staticInput = tf.input({ shape: [maxRunners, staticFeatures],          name: 'static_input'  });
 
+    // ── History branch ────────────────────────────────────────────────────────
+    // TimeDistributed runs the same LSTM stack independently for each runner.
+    // Masking before the LSTM ignores -1-padded history slots.
+
+    let h = tf.layers.timeDistributed({
+        layer: tf.layers.masking({ maskValue: -1 }),
+        name: 'hist_masking',
+    }).apply(histInput);
+
+    h = tf.layers.timeDistributed({
+        layer: tf.layers.lstm({
+            units: 64,
+            returnSequences: true,
+            recurrentDropout: 0.1,
+            kernelRegularizer: tf.regularizers.l2({ l2: 0.001 }),
+        }),
+        name: 'hist_lstm1',
+    }).apply(h);
+    // Output: [n_races, maxRunners, timeSteps, 64]
+
+    h = tf.layers.timeDistributed({
+        layer: tf.layers.lstm({
+            units: 32,
+            returnSequences: false,
+            recurrentDropout: 0.1,
+            kernelRegularizer: tf.regularizers.l2({ l2: 0.001 }),
+        }),
+        name: 'hist_lstm2',
+    }).apply(h);
+    // Output: [n_races, maxRunners, 32]
+
+    h = tf.layers.timeDistributed({
+        layer: tf.layers.batchNormalization(),
+        name: 'hist_bn',
+    }).apply(h);
+
+    h = tf.layers.timeDistributed({
+        layer: tf.layers.dropout({ rate: 0.3 }),
+        name: 'hist_dropout',
+    }).apply(h);
+
+    // ── Static branch ─────────────────────────────────────────────────────────
+    // TimeDistributed Dense processes each runner's static features independently.
+
+    let s = tf.layers.timeDistributed({
+        layer: tf.layers.dense({
+            units: 48,
+            activation: 'relu',
+            kernelRegularizer: tf.regularizers.l2({ l2: 0.001 }),
+        }),
+        name: 'static_dense1',
+    }).apply(staticInput);
+    // Output: [n_races, maxRunners, 48]
+
+    s = tf.layers.timeDistributed({
+        layer: tf.layers.batchNormalization(),
+        name: 'static_bn1',
+    }).apply(s);
+
+    s = tf.layers.timeDistributed({
+        layer: tf.layers.dense({ units: 32, activation: 'relu' }),
+        name: 'static_dense2',
+    }).apply(s);
+
+    s = tf.layers.timeDistributed({
+        layer: tf.layers.dropout({ rate: 0.3 }),
+        name: 'static_dropout',
+    }).apply(s);
+
+    // ── Merge branches ────────────────────────────────────────────────────────
+    // Concatenate history and static representations per runner.
+    // Output: [n_races, maxRunners, 64]
+
+    let combined = tf.layers.concatenate({ axis: -1, name: 'combine' }).apply([h, s]);
+
+    combined = tf.layers.timeDistributed({
+        layer: tf.layers.dense({ units: 64, activation: 'relu' }),
+        name: 'combined_dense',
+    }).apply(combined);
+
+    combined = tf.layers.timeDistributed({
+        layer: tf.layers.batchNormalization(),
+        name: 'combined_bn',
+    }).apply(combined);
+    // Output: [n_races, maxRunners, 64]
+
+    // ── Multi-Head Attention ──────────────────────────────────────────────────
+    // Self-attention over the runner dimension: the model learns which other
+    // horses in the race are relevant when scoring each individual runner.
+    // Query = Key = Value = combined  →  numHeads=4, keyDim=16 → 64-dim output
+
+    const attended = tf.layers.multiHeadAttention({
+        numHeads: 4,
+        keyDim:   16,
+        dropout:  0.1,
+        name:     'runner_attention',
+    }).apply([combined, combined]);
+    // Output: [n_races, maxRunners, 64]
+
+    // Residual connection + Layer Normalization (standard post-attention pattern)
+    const residual = tf.layers.add({ name: 'attention_residual' }).apply([combined, attended]);
+    const normed   = tf.layers.layerNormalization({ name: 'attention_ln' }).apply(residual);
+
+    // ── Output head ───────────────────────────────────────────────────────────
+    // Each runner gets its own top-3 probability via TimeDistributed sigmoid.
+
+    let out = tf.layers.timeDistributed({
+        layer: tf.layers.dropout({ rate: 0.25 }),
+        name: 'out_dropout',
+    }).apply(normed);
+
+    out = tf.layers.timeDistributed({
+        layer: tf.layers.dense({ units: 24, activation: 'relu' }),
+        name: 'out_dense',
+    }).apply(out);
+
+    out = tf.layers.timeDistributed({
+        layer: tf.layers.dense({ units: 1, activation: 'sigmoid' }),
+        name: 'output',
+    }).apply(out);
+    // Output: [n_races, maxRunners, 1]
+
+    const model = tf.model({ inputs: [histInput, staticInput], outputs: out });
+    model.compile({
+        optimizer: tf.train.adam(0.0003),
+        loss:      'binaryCrossentropy',   // padding runners must be masked from loss
+        metrics:   ['accuracy'],
+    });
+    return model;
+}
 // ─── PREDICTION ───────────────────────────────────────────────────────────────
 /*
 predictionFile should be the data for a single race in JSON format
