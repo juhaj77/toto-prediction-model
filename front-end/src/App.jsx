@@ -7,7 +7,9 @@ import {
     buildRunnerBasedFeatures, buildRaceBasedFeatures,
     fetchJSON, MAX_RUNNERS,
 } from './util.js';
-
+tf.setBackend('cpu').then(() => {
+    console.log("Backend asetettu: CPU");
+});
 // Register the custom layer ONCE at module load time, before any
 // tf.loadLayersModel() call. Safe to call multiple times.
 registerMultiHeadAttention();
