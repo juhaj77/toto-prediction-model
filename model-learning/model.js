@@ -1,7 +1,7 @@
 // ═══════════════════════════════════════════════════════════════════════════════
 // TOTO PREDICTION MODEL — model.js
 //
-// Reads:  ravit_opetusdata.json  (training)
+// Reads:  Learning_Data.json  (training)
 // Writes: ravimalli-mixed/model_full.json  (trained model weights)
 //         mappings.json                    (name → integer ID maps)
 //
@@ -14,7 +14,58 @@
 const tf = require('@tensorflow/tfjs');
 const fs = require('fs');
 
-const TRAINING_DATA  = './ravit_opetusdata.json';
+// Configuration toggles
+const USE_FOCAL_LOSS = true; // set true to use focal loss instead of BCE
+const FOCAL_GAMMA = 2.0;
+const FOCAL_ALPHA = 0.25;
+
+// ─── METRICS (runner-based) ───────────────────────────────────────────────────
+// ROC AUC when available in tf.metrics; otherwise return 0 as a placeholder.
+function aucRoc(yTrue, yPred) {
+    if (tf.metrics && typeof tf.metrics.auc === 'function') {
+        // Default curve is ROC in tfjs
+        return tf.metrics.auc(yTrue, yPred);
+    }
+    return tf.tidy(() => tf.scalar(0));
+}
+
+// Focal loss for imbalanced binary classification
+function focalLoss(gamma = FOCAL_GAMMA, alpha = FOCAL_ALPHA) {
+    return (yTrue, yPred) => tf.tidy(() => {
+        const eps = tf.scalar(1e-7);
+        const one = tf.scalar(1);
+        const p = yPred.clipByValue(1e-7, 1 - 1e-7);
+        const y = yTrue;
+        const pt = y.mul(p).add(one.sub(y).mul(one.sub(p))); // y ? p : 1-p
+        const w = y.mul(tf.scalar(alpha)).add(one.sub(y).mul(one.sub(tf.scalar(alpha))));
+        const loss = w.mul(tf.pow(one.sub(pt), tf.scalar(gamma))).mul(pt.log().neg());
+        return loss.mean();
+    });
+}
+
+// Precision at fixed threshold (default 0.5)
+function precisionAt05(yTrue, yPred) {
+    return tf.tidy(() => {
+        const thresh = tf.scalar(0.5);
+        const yHat = yPred.greater(thresh).toFloat();
+        const tp = yHat.mul(yTrue).sum();
+        const predPos = yHat.sum().add(tf.scalar(1e-7));
+        return tp.div(predPos);
+    });
+}
+
+// Recall at fixed threshold (default 0.5)
+function recallAt05(yTrue, yPred) {
+    return tf.tidy(() => {
+        const thresh = tf.scalar(0.5);
+        const yHat = yPred.greater(thresh).toFloat();
+        const tp = yHat.mul(yTrue).sum();
+        const pos = yTrue.sum().add(tf.scalar(1e-7));
+        return tp.div(pos);
+    });
+}
+
+const TRAINING_DATA  = './Learning_Data.json';
 const PREDICTION_DATA = '';
 const MAPPINGS_FILE  = './mappings.json';
 const MODEL_FOLDER   = './ravimalli-mixed';
@@ -22,7 +73,7 @@ const MAX_HISTORY    = 8;
 
 // ─── MODEL PERSISTENCE ────────────────────────────────────────────────────────
 
-async function saveModel(model, meta = {}) {
+async function saveModel(model, meta = {}, fileName = 'model_full.json') {
     if (!fs.existsSync(MODEL_FOLDER)) fs.mkdirSync(MODEL_FOLDER);
     await model.save(tf.io.withSaveHandler(async (artifacts) => {
         const payload = {
@@ -35,14 +86,21 @@ async function saveModel(model, meta = {}) {
                 loss:          meta.loss          ?? null,
                 val_loss:      meta.val_loss       ?? null,
                 val_acc:       meta.val_acc        ?? null,
+                val_auc:       meta.val_auc       ?? null,
+                val_ap:        meta.val_ap        ?? null,
+                best_by:       meta.best_by       ?? 'val_loss',
                 learningRate:  meta.learningRate   ?? null,
                 dataStartDate: meta.dataStartDate  ?? null,
                 dataEndDate:   meta.dataEndDate    ?? null,
                 totalRaces:    meta.totalRaces     ?? null,
                 totalRunners:  meta.totalRunners   ?? null,
+                recommended_threshold: meta.recommended_threshold ?? null,
+                calibration:   meta.calibration    ?? null,
+                metrics_at_selection: meta.metrics_at_selection ?? null,
+                history:       meta.history        ?? null,
             },
         };
-        fs.writeFileSync(`${MODEL_FOLDER}/model_full.json`, JSON.stringify(payload));
+        fs.writeFileSync(`${MODEL_FOLDER}/${fileName}`, JSON.stringify(payload));
         return { modelArtifactsInfo: { dateSaved: new Date(), modelTopologyType: 'JSON' } };
     }));
 }
@@ -186,10 +244,23 @@ function loadData(filePath, isTraining = true) {
     const Y        = [];
     const metadata = [];
 
+    // Filter out races with no positive target (no runner finished 1–3)
+    let keptRaces = 0;
+    let droppedRaces = 0;
+    const keptDates = [];
+
     for (const race of races) {
         const breed     = race.isColdBlood ? 'SH' : 'LV';
         const starters  = (race.runners || []).filter(r => !r.scratched);
         const neutral   = (starters.length + 1) / 2;
+
+        // Skip races where none of the starters has a positive target (position 1–3)
+        if (isTraining) {
+            const hasPositive = starters.some(r => r && r.position != null && r.position >= 1 && r.position <= 3);
+            if (!hasPositive) { droppedRaces++; continue; }
+        }
+        keptRaces++;
+        if (race.date) keptDates.push(race.date);
 
         for (const runner of starters) {
             const rankKey  = `${race.trackID}_${runner.number}`;
@@ -235,9 +306,9 @@ function loadData(filePath, isTraining = true) {
             // ── Static features — 27 total ────────────────────────────────────
             const staticFeats = [
                 (runner.number || 1) / 20,                                        // [0]  start number
-                getID(maps.coaches, runner.coach,  'coach')  / 2000,              // [1]  coach ID
+                getID(maps.coaches, runner.coach,  'coach')  / 6000,         // [1]  coach ID. Currently 4649
                 (runner.record || means[breed].record) / 50,                      // [2]  race record (imputed if missing)
-                getID(maps.drivers, runner.driver, 'driver') / 3000,              // [3]  current driver ID
+                getID(maps.drivers, runner.driver, 'driver') / 5000,         // [3]  current driver ID Currently 3759
                 (runner.age || 5) / 15,                                           // [4]  age
                 (runner.gender || 2) / 3,                                         // [5]  gender (1=mare 2=gelding 3=stallion)
                 race.isColdBlood ? 1 : 0,                                         // [6]  cold blood breed
@@ -301,10 +372,10 @@ function loadData(filePath, isTraining = true) {
                     prizeFinal, prizeKnown,                                        // [7-8]   prize money (log-scaled)
                     oddFinal,   oddKnown,                                          // [9-10]  win odds (log-scaled)
                     ps.isCarStart   ? 1 : 0,                                       // [11]    car start
-                    ps.break        ? 1 : 0,                                       // [12]    gait fault (break)
+                    ps.isGallop       ? 1 : 0,                                       // [12]    gait fault (break)
                     (ps.number ?? 1) / 30,                                         // [13]    start position
-                    getID(maps.drivers, ps.driver, 'driver') / 3000,               // [14]    driver ID
-                    getID(maps.tracks,  ps.track,  'track')  / 500,                // [15]    track ID
+                    getID(maps.drivers, ps.driver, 'driver') / 5000,               // [14]    driver ID
+                    getID(maps.tracks,  ps.track,  'track')  / 600,                // [15]    track ID. currently 492
                     ps.disqualified ? 1 : 0,                                       // [16]    disqualified
                     ps.DNF          ? 1 : 0,                                       // [17]    did not finish
                     psfront === 'HAS_SHOES' ? 1 : 0,                               // [18]    front shoes on
@@ -342,19 +413,24 @@ function loadData(filePath, isTraining = true) {
         );
     }
 
-    const allDates = races.map(r => r.date).filter(Boolean).sort();
+    const allDates = keptDates.length ? keptDates.slice().sort() : races.map(r => r.date).filter(Boolean).sort();
     const dataMeta = {
-        totalRaces:    races.length,
+        totalRaces:    keptRaces > 0 ? keptRaces : races.length,
         totalRunners:  X_hist.length,
         dataStartDate: allDates[0]                   ?? null,
         dataEndDate:   allDates[allDates.length - 1] ?? null,
+        droppedRacesNoTarget: droppedRaces,
     };
 
-    if (isTraining)
+    if (isTraining) {
         console.log(
             `  Data: ${dataMeta.totalRunners} runners across ${dataMeta.totalRaces} races, ` +
             `${dataMeta.dataStartDate} → ${dataMeta.dataEndDate}`
         );
+        if (droppedRaces > 0) {
+            console.log(`  Filter: dropped ${droppedRaces} races without any valid target (no runner position > 0).`);
+        }
+    }
 
     return {
         hist:               tf.tensor3d(X_hist),
@@ -380,15 +456,15 @@ function buildModel(timeSteps, histFeatures, staticFeatures) {
     // History branch
     let h = tf.layers.masking({ maskValue: -1 }).apply(histInput);
     h = tf.layers.lstm({ units: 64, returnSequences: true,  recurrentDropout: 0.1,
-        kernelRegularizer: tf.regularizers.l2({ l2: 0.001 }) }).apply(h);
+        kernelRegularizer: tf.regularizers.l2({ l2: 0.0005 }) }).apply(h);
     h = tf.layers.lstm({ units: 32, returnSequences: false, recurrentDropout: 0.1,
-        kernelRegularizer: tf.regularizers.l2({ l2: 0.001 }) }).apply(h);
+        kernelRegularizer: tf.regularizers.l2({ l2: 0.0005 }) }).apply(h);
     h = tf.layers.batchNormalization().apply(h);
     h = tf.layers.dropout({ rate: 0.3 }).apply(h);
 
     // Static branch
     let s = tf.layers.dense({ units: 48, activation: 'relu',
-        kernelRegularizer: tf.regularizers.l2({ l2: 0.001 }) }).apply(staticInput);
+        kernelRegularizer: tf.regularizers.l2({ l2: 0.0005 }) }).apply(staticInput);
     s = tf.layers.batchNormalization().apply(s);
     s = tf.layers.dense({ units: 32, activation: 'relu' }).apply(s);
     s = tf.layers.dropout({ rate: 0.3 }).apply(s);
@@ -404,32 +480,185 @@ function buildModel(timeSteps, histFeatures, staticFeatures) {
     const model = tf.model({ inputs: [histInput, staticInput], outputs: out });
     model.compile({
         optimizer: tf.train.adam(0.0003),
-        loss: 'binaryCrossentropy',
-        metrics: ['accuracy'],
+        loss: USE_FOCAL_LOSS ? focalLoss() : 'binaryCrossentropy',
+        metrics: ['accuracy', precisionAt05, recallAt05],
     });
     return model;
+}
+
+// ─── EVAL/UTIL HELPERS ───────────────────────────────────────────────────────
+
+function seededRng(seed = 42) {
+    // Simple LCG
+    let s = Math.floor(seed) >>> 0;
+    return function() {
+        s = (1664525 * s + 1013904223) >>> 0;
+        return (s & 0xffffffff) / 0x100000000;
+    };
+}
+
+function seededShuffle(arr, seed = 42) {
+    const rng = seededRng(seed);
+    for (let i = arr.length - 1; i > 0; i--) {
+        const j = Math.floor(rng() * (i + 1));
+        const tmp = arr[i]; arr[i] = arr[j]; arr[j] = tmp;
+    }
+    return arr;
+}
+
+function splitTrainValTensors(hist, stat, y, valFraction = 0.1, seed = 42) {
+    const n = y.shape[0];
+    const idx = Array.from({ length: n }, (_, i) => i);
+    seededShuffle(idx, seed);
+    const valCount = Math.max(1, Math.floor(n * valFraction));
+    const valIdx = idx.slice(0, valCount);
+    const trainIdx = idx.slice(valCount);
+
+    const idxTrain = tf.tensor1d(trainIdx, 'int32');
+    const idxVal   = tf.tensor1d(valIdx, 'int32');
+
+    const histTrain = tf.gather(hist, idxTrain);
+    const statTrain = tf.gather(stat, idxTrain);
+    const yTrain    = tf.gather(y, idxTrain);
+
+    const histVal = tf.gather(hist, idxVal);
+    const statVal = tf.gather(stat, idxVal);
+    const yVal    = tf.gather(y, idxVal);
+
+    idxTrain.dispose(); idxVal.dispose();
+    return { histTrain, statTrain, yTrain, histVal, statVal, yVal };
+}
+
+function computeClassWeightsFromLabels(yTensor) {
+    const y = Array.from(yTensor.dataSync());
+    let pos = 0; let neg = 0;
+    for (let i = 0; i < y.length; i++) {
+        const v = y[i];
+        if (v >= 0.5) pos++; else neg++;
+    }
+    const wPos = pos > 0 ? Math.sqrt(neg / pos) : 1.0;
+    const wNeg = 1.0;
+    return { 0: wNeg, 1: wPos, counts: { pos, neg, wPos, wNeg } };
+}
+
+function sigmoid(x) { return 1 / (1 + Math.exp(-x)); }
+
+function sweepMetrics(yTrueArr, yPredArr, tMin = 0.01, tMax = 0.99, step = 0.01) {
+    const points = [];
+    let bestF1 = -1; let bestT = 0.5; let bestP = 0; let bestR = 0;
+    for (let t = tMin; t <= tMax + 1e-8; t += step) {
+        let tp = 0, fp = 0, fn = 0;
+        for (let i = 0; i < yTrueArr.length; i++) {
+            const y = yTrueArr[i] >= 0.5 ? 1 : 0;
+            const yhat = yPredArr[i] >= t ? 1 : 0;
+            if (yhat === 1 && y === 1) tp++;
+            else if (yhat === 1 && y === 0) fp++;
+            else if (yhat === 0 && y === 1) fn++;
+        }
+        const precision = tp / Math.max(1, tp + fp);
+        const recall    = tp / Math.max(1, tp + fn);
+        const f1 = (precision + recall) > 0 ? (2 * precision * recall) / (precision + recall) : 0;
+        points.push({ t: Number(t.toFixed(2)), p: precision, r: recall, f1 });
+        if (f1 > bestF1) { bestF1 = f1; bestT = Number(t.toFixed(2)); bestP = precision; bestR = recall; }
+    }
+    // AP via trapezoid over recall (ensure monotonic order by recall)
+    const pts = points.slice().sort((a, b) => a.r - b.r);
+    let ap = 0;
+    for (let i = 1; i < pts.length; i++) {
+        const r0 = pts[i-1].r, r1 = pts[i].r;
+        const p0 = pts[i-1].p, p1 = pts[i].p;
+        ap += Math.max(0, (r1 - r0)) * ((p0 + p1) / 2);
+    }
+    return { prCurve: points, ap, best: { t: bestT, f1: bestF1, p: bestP, r: bestR } };
+}
+
+function estimateTemperatureScaling(yTrueArr, pArr) {
+    // Avoid 0/1 extremes
+    const eps = 1e-7;
+    const logits = pArr.map(p => Math.log(Math.min(1 - eps, Math.max(eps, p)) / (1 - Math.min(1 - eps, Math.max(eps, p)))));
+    // Grid search T in [0.5, 5.0]
+    let bestT = 1.0; let bestNLL = Infinity;
+    for (let T = 0.5; T <= 5.0001; T += 0.05) {
+        let nll = 0;
+        for (let i = 0; i < logits.length; i++) {
+            const z = logits[i] / T;
+            const pCal = sigmoid(z);
+            const y = yTrueArr[i] >= 0.5 ? 1 : 0;
+            nll += -(y * Math.log(Math.max(eps, pCal)) + (1 - y) * Math.log(Math.max(eps, 1 - pCal)));
+        }
+        nll /= logits.length;
+        if (nll < bestNLL) { bestNLL = nll; bestT = Number(T.toFixed(2)); }
+    }
+    return { T: bestT, nll: bestNLL };
+}
+
+function computeRocAuc(yTrueArr, yPredArr, step = 0.01) {
+    const points = [];
+    for (let t = 0.0; t <= 1.000001; t += step) {
+        let tp = 0, fp = 0, tn = 0, fn = 0;
+        for (let i = 0; i < yTrueArr.length; i++) {
+            const y = yTrueArr[i] >= 0.5 ? 1 : 0;
+            const yhat = yPredArr[i] >= t ? 1 : 0;
+            if (yhat === 1 && y === 1) tp++;
+            else if (yhat === 1 && y === 0) fp++;
+            else if (yhat === 0 && y === 0) tn++;
+            else fn++;
+        }
+        const tpr = tp / Math.max(1, tp + fn);
+        const fpr = fp / Math.max(1, fp + tn);
+        points.push({ fpr, tpr });
+    }
+    // Ensure endpoints
+    points.push({ fpr: 0, tpr: 0 });
+    points.push({ fpr: 1, tpr: 1 });
+    points.sort((a, b) => a.fpr - b.fpr);
+    let auc = 0;
+    for (let i = 1; i < points.length; i++) {
+        const x0 = points[i - 1].fpr, x1 = points[i].fpr;
+        const y0 = points[i - 1].tpr, y1 = points[i].tpr;
+        auc += Math.max(0, x1 - x0) * (y0 + y1) / 2;
+    }
+    return { auc: Math.max(0, Math.min(1, auc)), rocCurve: points };
 }
 
 // ─── TRAINING ─────────────────────────────────────────────────────────────────
 
 async function runTraining() {
-    console.log('--- TRAINING ---');
+    console.log('--- TRAINING (runner-based) ---');
     const data  = loadData(TRAINING_DATA, true);
     const model = buildModel(MAX_HISTORY, data.histFeatureCount, data.staticFeatureCount);
 
+    console.log(`  Tensor shapes — hist: ${data.hist.shape}  static: ${data.static.shape}  y: ${data.y.shape}`);
+    console.log('  Metrikat: AUC(ROC) = erotteleva kyky kaikilla kynnyksillä\n' +
+                '            Precision@0.5 = TP / (TP + FP) kynnyksellä 0.5\n' +
+                '            Recall@0.5 = TP / (TP + FN) kynnyksellä 0.5.');
+
+    // Deterministic split (runner-level; for race-grouped, extend loader)
+    const { histTrain, statTrain, yTrain, histVal, statVal, yVal } = splitTrainValTensors(
+        data.hist, data.static, data.y, 0.1, 1337
+    );
+
+    // Dynamic class weights from the TRAIN set
+    const cw = computeClassWeightsFromLabels(yTrain);
+    console.log(`  Class weights (dynamic): neg=${cw[0].toFixed(3)} pos=${cw[1].toFixed(3)} | counts pos=${cw.counts.pos} neg=${cw.counts.neg}`);
+
     let bestValLoss     = Infinity;
-    let patienceCounter = 0;
-    let lrPatienceCount = 0;
+    let bestValAuc      = -Infinity;
+    let bestValAp       = -Infinity;
+    let bestByApMeta    = null;
+    let lossPatience    = 0;   // patience for val_loss
+    let aucPatience     = 0;   // patience for val_auc
     const EARLY_STOP_PATIENCE = 16;
     const LR_REDUCE_PATIENCE  = 5;
     let epochStart;
+    const history = [];
 
-    await model.fit([data.hist, data.static], data.y, {
+    await model.fit([histTrain, statTrain], yTrain, {
         epochs:          50,
         batchSize:       64,
-        validationSplit: 0.1,
         shuffle:         true,
-        classWeight:     { 0: 1.0, 1: 1.3 },
+        classWeight:     USE_FOCAL_LOSS ? undefined : { 0: cw[0], 1: cw[1] },
+        validationData:  [[histVal, statVal], yVal],
         callbacks: {
             onEpochBegin: async () => { epochStart = Date.now(); },
             onEpochEnd: async (epoch, logs) => {
@@ -437,46 +666,146 @@ async function runTraining() {
                 const lr  = model.optimizer.learningRate;
                 const acc = (logs.val_acc || logs.val_accuracy || 0).toFixed(4);
 
+                // Compute manual ROC-AUC on full validation set (avoid unstable batch AUC)
+                // We will compute it after predicting on the full validation set below.
+                let aucValNum = NaN;
+                const p05ValNum = Number(
+                    logs.val_precisionAt05 || logs.val_precision_at_05 || logs.val_precision || 0
+                );
+                const r05ValNum = Number(
+                    logs.val_recallAt05 || logs.val_recall_at_05 || logs.val_recall || 0
+                );
+
+                // Predict on validation to compute PR/AP and threshold sweep
+                const yPredValTensor = model.predict([histVal, statVal], { batchSize: 1024 });
+                const yPredVal = Array.from(yPredValTensor.dataSync());
+                yPredValTensor.dispose();
+                const yTrueVal = Array.from(yVal.dataSync());
+
+                const sweep = sweepMetrics(yTrueVal, yPredVal, 0.01, 0.99, 0.01);
+                const apVal = sweep.ap;
+                const tStar = sweep.best.t;
+                const calib = estimateTemperatureScaling(yTrueVal, yPredVal);
+                const { auc: rocAuc } = computeRocAuc(yTrueVal, yPredVal, 0.01);
+                aucValNum = rocAuc;
+
+                const aucv = aucValNum.toFixed(4);
+                const p05v = p05ValNum.toFixed(4);
+                const r05v = r05ValNum.toFixed(4);
+                const apv  = apVal.toFixed(4);
+
+                const histItem = {
+                    epoch: epoch + 1,
+                    loss: logs.loss,
+                    val_loss: logs.val_loss,
+                    val_acc: Number(logs.val_acc || logs.val_accuracy || 0),
+                    val_auc: aucValNum,
+                    val_ap:  apVal,
+                    val_p05: p05ValNum,
+                    val_r05: r05ValNum,
+                    recommended_threshold: tStar,
+                    calibration: { type: 'temperature', T: calib.T },
+                    pr_curve: sweep.prCurve, // optional; remove if file size is a concern
+                    lr,
+                };
+                history.push(histItem);
+
                 console.log(
                     `Epoch ${epoch + 1}: loss=${logs.loss.toFixed(4)} | ` +
-                    `val_loss=${logs.val_loss.toFixed(4)} | val_acc=${acc} | ` +
-                    `lr=${lr.toFixed(6)} | ` +
+                    `val_loss=${logs.val_loss.toFixed(4)} | val_acc=${acc} | val_auc=${aucv} | val_ap=${apv} | val_p@0.5=${p05v} | val_r@0.5=${r05v} | ` +
+                    `t*=${tStar} | T=${calib.T} | lr=${lr.toFixed(6)} | ` +
                     `${Math.floor(ms / 60000)}m ${((ms % 60000) / 1000).toFixed(0)}s`
                 );
 
+                // Save by val_loss
                 if (logs.val_loss < bestValLoss) {
                     bestValLoss = logs.val_loss;
-                    patienceCounter = 0;
-                    lrPatienceCount = 0;
+                    lossPatience = 0;
                     console.log('   ⭐ New best val_loss — saving...');
                     await saveModel(model, {
                         epoch:         epoch + 1,
                         loss:          Math.round(logs.loss * 10000) / 10000,
                         val_loss:      Math.round(logs.val_loss * 10000) / 10000,
                         val_acc:       Math.round((logs.val_acc || logs.val_accuracy || 0) * 10000) / 10000,
+                        val_auc:       Math.round(aucValNum * 10000) / 10000,
+                        val_ap:        Math.round(apVal * 10000) / 10000,
+                        best_by:       'val_loss',
                         learningRate:  lr,
+                        recommended_threshold: tStar,
+                        calibration:   { type: 'temperature', T: calib.T },
+                        metrics_at_selection: { f1_at_t: sweep.best.f1, p_at_t: sweep.best.p, r_at_t: sweep.best.r },
+                        history,
                         ...data.dataMeta,
-                    });
+                    }, 'model_full.json');
                 } else {
-                    patienceCounter++;
-                    lrPatienceCount++;
-                    if (lrPatienceCount >= LR_REDUCE_PATIENCE) {
-                        model.optimizer.learningRate = lr * 0.5;
-                        console.log(`   📉 Reducing LR: ${(lr * 0.5).toFixed(6)}`);
-                        lrPatienceCount = 0;
-                    }
-                    if (patienceCounter >= EARLY_STOP_PATIENCE) {
-                        console.log('--- Early stopping ---');
-                        model.stopTraining = true;
-                    }
+                    lossPatience++;
+                }
+
+                // Save by val_auc
+                if (aucValNum > bestValAuc) {
+                    bestValAuc = aucValNum;
+                    aucPatience = 0;
+                    console.log('   🌟 New best val_auc — saving...');
+                    await saveModel(model, {
+                        epoch:         epoch + 1,
+                        loss:          Math.round(logs.loss * 10000) / 10000,
+                        val_loss:      Math.round(logs.val_loss * 10000) / 10000,
+                        val_acc:       Math.round((logs.val_acc || logs.val_accuracy || 0) * 10000) / 10000,
+                        val_auc:       Math.round(aucValNum * 10000) / 10000,
+                        val_ap:        Math.round(apVal * 10000) / 10000,
+                        best_by:       'val_auc',
+                        learningRate:  lr,
+                        recommended_threshold: tStar,
+                        calibration:   { type: 'temperature', T: calib.T },
+                        metrics_at_selection: { f1_at_t: sweep.best.f1, p_at_t: sweep.best.p, r_at_t: sweep.best.r },
+                        history,
+                        ...data.dataMeta,
+                    }, 'model_best_auc.json');
+                } else {
+                    aucPatience++;
+                }
+
+                // Save by AP (AUC-PR)
+                if (apVal > bestValAp) {
+                    bestValAp = apVal;
+                    console.log('   💠 New best AP — saving...');
+                    bestByApMeta = {
+                        epoch:         epoch + 1,
+                        loss:          Math.round(logs.loss * 10000) / 10000,
+                        val_loss:      Math.round(logs.val_loss * 10000) / 10000,
+                        val_acc:       Math.round((logs.val_acc || logs.val_accuracy || 0) * 10000) / 10000,
+                        val_auc:       Math.round(aucValNum * 10000) / 10000,
+                        val_ap:        Math.round(apVal * 10000) / 10000,
+                        best_by:       'val_ap',
+                        learningRate:  lr,
+                        recommended_threshold: tStar,
+                        calibration:   { type: 'temperature', T: calib.T },
+                        metrics_at_selection: { f1_at_t: sweep.best.f1, p_at_t: sweep.best.p, r_at_t: sweep.best.r },
+                        history,
+                        ...data.dataMeta,
+                    };
+                    await saveModel(model, bestByApMeta, 'model_best_ap.json');
+                }
+
+                if (aucPatience >= LR_REDUCE_PATIENCE || lossPatience >= LR_REDUCE_PATIENCE) {
+                    model.optimizer.learningRate = lr * 0.5;
+                    console.log(`   📉 Reducing LR (plateau): ${(lr * 0.5).toFixed(6)}`);
+                    aucPatience = 0;
+                    lossPatience = 0;
+                }
+
+                if (lossPatience >= EARLY_STOP_PATIENCE && aucPatience >= EARLY_STOP_PATIENCE) {
+                    console.log('--- Early stopping (loss & AUC plateau) ---');
+                    model.stopTraining = true;
                 }
             },
         },
     });
 
-    data.hist.dispose();
-    data.static.dispose();
-    data.y.dispose();
+    // Dispose tensors
+    data.hist.dispose(); data.static.dispose(); data.y.dispose();
+    histTrain.dispose(); statTrain.dispose(); yTrain.dispose();
+    histVal.dispose();   statVal.dispose();   yVal.dispose();
 }
 
 // ─── PREDICTION ───────────────────────────────────────────────────────────────

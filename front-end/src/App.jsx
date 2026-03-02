@@ -1,391 +1,122 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import RunnerModal from './RunnerModal.jsx';
 import * as tf from '@tensorflow/tfjs';
+import { registerMultiHeadAttention } from './MultiHeadAttention.js';
+import {
+    sanitize, detectColdBlood, normaliseRunners,
+    buildRunnerBasedFeatures, buildRaceBasedFeatures,
+    fetchJSON, MAX_RUNNERS,
+} from './util.js';
 
-// ─── CONFIG ───────────────────────────────────────────────────────────────────
-const MAX_HISTORY = 8;
+// Register the custom layer ONCE at module load time, before any
+// tf.loadLayersModel() call. Safe to call multiple times.
+registerMultiHeadAttention();
 
-// ─── FEATURE HELPERS — must match ravimalli.js and scraper.js exactly ─────────
+// ─── MODEL REGISTRY ───────────────────────────────────────────────────────────
+// Runner-based uses mappings.json (model.js writes it).
+// Race-based uses mappings_race.json (ravimalli-race.js writes it).
 
-// Transliterate Finnish characters and strip non-ASCII (mirrors scraper.js puhdista)
-function sanitize(str) {
-    if (!str) return '';
-    return str
-        .replace(/ä/g, 'a').replace(/ö/g, 'o').replace(/å/g, 'a')
-        .replace(/Ä/g, 'A').replace(/Ö/g, 'O').replace(/Å/g, 'A')
-        .replace(/[^a-zA-Z0-9\s\-\.\:]/g, '')
-        .trim();
-}
-
-// Parse raw km-time string from Veikkaus API.
-// Format examples: "15,5"  "15,5a" (car start)  "15,5x" (gait fault / break)
-function parseKmTime(raw) {
-    if (!raw) return { kmNum: 0, isCarStart: false, isBreak: false };
-    const s          = String(raw);
-    const isCarStart = s.includes('a');
-    const isBreak    = s.includes('x');
-    const match      = s.match(/[\d,]+/);
-    const kmNum      = match ? parseFloat(match[0].replace(',', '.')) : 0;
-    return { kmNum: isNaN(kmNum) ? 0 : kmNum, isCarStart, isBreak };
-}
-
-// Normalise km time to a 2100 m base distance so times from different
-// distances are comparable. Correlation with position: r = 0.031 → 0.090.
-function normaliseKmTime(km, distance) {
-    if (!km || isNaN(km) || km <= 0) return km;
-    return km + (2100 - (distance || 2100)) / 2000;
-}
-
-// Parse finishing position from API result string.
-// Returns numeric position (1–16), 20 for disqualification, 21 for DNF.
-function parsePosition(result) {
-    if (!result) return { position: null, disqualified: false, DNF: false };
-    const s            = String(result).toLowerCase();
-    const disqualified = /[hdp]/.test(s);
-    const DNF          = s.includes('k');
-    const numMatch     = s.match(/^\d+/);
-    let position       = null;
-    if (numMatch)          position = parseInt(numMatch[0]);
-    else if (disqualified) position = 20;
-    else if (DNF)          position = 21;
-    return { position, disqualified, DNF };
-}
-
-// Detect cold blood breed (Finnhorse) from sire/dam pedigree strings.
-// Warmblood pedigree entries carry a country code suffix like "Make It Happen* (US)".
-// Finnhorse entries have no country code. Falls back to false if both fields are empty.
-function detectColdBlood(raceInfo, runnerSample) {
-    // Prefer explicit breed field if the races endpoint provides it
-    if (raceInfo?.breed === 'K' || raceInfo?.breed === 'FINNHORSE') return true;
-    if (raceInfo?.breed && raceInfo.breed !== '') return false;
-    // Fallback: inspect sire/dam of the first non-scratched runner
-    if (!runnerSample) return false;
-    const sire = runnerSample.sire || '';
-    const dam  = runnerSample.dam  || '';
-    if (!sire && !dam) return false;
-    return !/\([A-Z]{2}\)/.test(sire) && !/\([A-Z]{2}\)/.test(dam);
-}
-
-// Gender code → numeric (1 = mare, 2 = gelding, 3 = stallion)
-function encodeGender(g) {
-    if (g === 'TAMMA') return 1;
-    if (g === 'ORI')   return 3;
-    return 2;
-}
-
-// Select the best available race record for this runner.
-// Priority depends on start type: car starts prefer mobileStartRecord.
-function parseRecord(runner, isCarStart) {
-    const order = isCarStart
-        ? ['mobileStartRecord', 'handicapRaceRecord', 'vaultStartRecord']
-        : ['handicapRaceRecord', 'mobileStartRecord', 'vaultStartRecord'];
-    for (const key of order) {
-        const val = runner[key];
-        if (!val) continue;
-        const num = parseFloat(String(val).replace(',', '.'));
-        if (!isNaN(num) && num > 0)
-            return { record: num, isAutoRecord: key === 'mobileStartRecord' };
-    }
-    return { record: null, isAutoRecord: false };
-}
-
-// Shoe value normalisation — accept multiple API formats
-function encodeShoes(val) {
-    if (!val) return 'UNKNOWN';
-    const s = String(val).toUpperCase();
-    if (['HAS_SHOES', 'TRUE', 'YES', '1'].includes(s)) return 'HAS_SHOES';
-    if (['NO_SHOES',  'FALSE', 'NO', '0'].includes(s)) return 'NO_SHOES';
-    return 'UNKNOWN';
-}
-
-// Betting percentage — betPercentages.KAK.percentage is ×100 (e.g. 1148 = 11.48%)
-function parseBettingPct(runner) {
-    return parseFloat(runner.betPercentages?.KAK?.percentage ?? 0) / 100;
-}
-
-// Historical win percentage from runner stats
-function parseWinPct(runner) {
-    try {
-        const total = runner.stats?.total;
-        if (total?.winningPercent != null) return parseFloat(total.winningPercent);
-        if (total?.starts > 0) return Math.round((total.position1 / total.starts) * 10000) / 100;
-    } catch (_) {}
-    return 0;
-}
-
-// Track condition → 0–1 scale (0 = heaviest, 1 = lightest)
-function encodeTrackCondition(condition) {
-    switch ((String(condition ?? '')).toLowerCase().trim()) {
-        case 'heavy track':       return 0.00;
-        case 'heavy':             return 0.00;
-        case 'sloppy':            return 0.10;
-        case 'quite heavy track': return 0.25;
-        case 'good':              return 0.70;
-        case 'winter track':      return 0.75;
-        case 'fast':              return 0.85;
-        case 'light track':       return 1.00;
-        default:                  return 0.50;
-    }
-}
-
-// Use surname only so "J Mäkinen" and "Juhani Mäkinen" resolve to the same ID
-function extractSurname(fullName) {
-    if (!fullName) return 'unknown';
-    return fullName.trim().toLowerCase().split(' ').at(-1);
-}
-
-function parseDate(str) {
-    if (!str || str === '0' || str === 'NaT') return null;
-    if (str.includes('-')) return new Date(str);
-    if (str.includes('.')) {
-        const [d, m, y] = str.split('.');
-        const year = parseInt(y) < 100 ? parseInt(y) + 2000 : parseInt(y);
-        return new Date(year, parseInt(m) - 1, parseInt(d));
-    }
-    return null;
-}
-
-// ─── FEATURE BUILDER — must produce identical tensors to ravimalli.js ─────────
-
-function buildFeatures(runners, maps, raceDate, raceDistance, isColdBlood, isCarStart) {
-    const breed = isColdBlood ? 'SH' : 'LV';
-    const means = { SH: { record: 28.0, km: 29.0 }, LV: { record: 15.0, km: 16.0 } };
-
-    // Look up a stable integer ID from the training-time name maps.
-    // Supports both new key names (coaches/drivers/tracks) and legacy Finnish names
-    // (valmentajat/ohjastajat/radat) so existing mappings.json files still work.
-    const getID = (map, name, type) => {
-        if (!name || name === 'Unknown' || name === '') return 0;
-        const key = (type === 'driver') ? extractSurname(name) : name.trim().toLowerCase();
-        return map[key] || 0;
-    };
-
-    const coachMap  = maps.coaches      || maps.valmentajat || {};
-    const driverMap = maps.drivers      || maps.ohjastajat  || {};
-    const trackMap  = maps.tracks       || maps.radat       || {};
-
-    // Per-race relative rank is more informative than the raw percentage value
-    const starters      = runners.filter(r => !r.scratched);
-    const hasBet        = starters.some(r => (r.bettingPct || 0) > 0);
-    const hasWin        = starters.some(r => (r.winPct     || 0) > 0);
-    const neutral       = (starters.length + 1) / 2;
-
-    const byBet = [...starters].sort((a, b) => (b.bettingPct || 0) - (a.bettingPct || 0));
-    const byWin = [...starters].sort((a, b) => (b.winPct     || 0) - (a.winPct     || 0));
-
-    const X_hist   = [];
-    const X_static = [];
-    const metadata = [];
-
-    for (const runner of starters) {
-        const betKnown  = hasBet && (runner.bettingPct || 0) > 0 ? 1 : 0;
-        const winKnown  = hasWin && (runner.winPct     || 0) > 0 ? 1 : 0;
-        const betRank   = betKnown ? byBet.findIndex(r => r.number === runner.number) + 1 : neutral;
-        const winRank   = winKnown ? byWin.findIndex(r => r.number === runner.number) + 1 : neutral;
-
-        // Shoe encoding
-        const frontStr    = (runner.frontShoes || '').toUpperCase();
-        const rearStr     = (runner.rearShoes  || '').toUpperCase();
-        const frontActive = frontStr === 'HAS_SHOES' ? 1 : 0;
-        const frontKnown  = (frontStr === 'HAS_SHOES' || frontStr === 'NO_SHOES') ? 1 : 0;
-        const rearActive  = rearStr  === 'HAS_SHOES' ? 1 : 0;
-        const rearKnown   = (rearStr  === 'HAS_SHOES' || rearStr  === 'NO_SHOES') ? 1 : 0;
-
-        // Special cart
-        const cartStr    = (runner.specialCart || '').toUpperCase();
-        const cartActive = cartStr === 'YES' ? 1 : 0;
-        const cartKnown  = (cartStr === 'YES' || cartStr === 'NO') ? 1 : 0;
-
-        // Weighted podium index normalised by ALL starts (disq/DNF = 0 pts, still counted).
-        // This penalises horses with many non-finishes. Correlation with top-3: r = 0.161.
-        // The Veikkaus API returns position as a raw result string (e.g. "1", "hyl", "k").
-        const prevStarts  = runner.prevStarts || [];
-        const validPrev   = prevStarts.filter(ps => {
-            const date   = (ps.shortMeetDate || ps.meetDate || '').trim();
-            const driver = (ps.driverFullName || ps.driver  || '').trim();
-            return date !== '' && driver !== '';
-        });
-        const histKnown   = validPrev.length > 0 ? 1 : 0;
-        let prevIndexNorm = 0;
-
-        if (validPrev.length > 0) {
-            let score = 0, count = 0;
-            for (const ps of validPrev) {
-                const { position, disqualified, DNF } = parsePosition(ps.result);
-                // All starts count toward the denominator — including disq and DNF.
-                // Only podium finishes add to the numerator.
-                if (position === null) continue;
-                count++;
-                if      (position === 1) score += 1.00;
-                else if (position === 2) score += 0.50;
-                else if (position === 3) score += 0.33;
-                // position > 3, disqualified (20), DNF (21) → 0 pts
-            }
-            prevIndexNorm = count > 0 ? score / count : 0;
-        }
-
-        // ── Static features — 27 total, same order as ravimalli.js ──────────
-        const staticFeats = [
-            (runner.number || 1) / 20,                                        // [0]  start number
-            getID(coachMap,  runner.coach,  'coach')  / 2000,              // [1]  coach ID
-            (runner.record || means[breed].record) / 50,                      // [2]  race record
-            getID(driverMap, runner.driver, 'driver') / 3000,              // [3]  driver ID
-            (runner.age || 5) / 15,                                           // [4]  age
-            (runner.gender || 2) / 3,                                         // [5]  gender
-            isColdBlood ? 1 : 0,                                              // [6]  cold blood breed
-            frontActive, frontKnown,                                          // [7-8]   front shoes
-            rearActive,  rearKnown,                                           // [9-10]  rear shoes
-            runner.frontShoesChanged ? 1 : 0,                                 // [11] front shoes changed
-            runner.rearShoesChanged  ? 1 : 0,                                 // [12] rear shoes changed
-            (raceDistance || 2100) / 3100,                                    // [13] race distance
-            isCarStart ? 1 : 0,                                               // [14] car start
-            (runner.bettingPct || 0) / 100,                                   // [15] raw betting %
-            (runner.winPct     || 0) / 100,                                   // [16] historical win %
-            (runner.winPct     || 0) > 0 ? 1 : 0,                             // [17] win % known
-            runner.isAutoRecord ? 1 : 0,                                      // [18] record from car start
-            cartActive, cartKnown,                                            // [19-20] special cart
-            betRank / 20, betKnown,                                           // [21-22] betting rank
-            winRank / 20, winKnown,                                           // [23-24] win rank
-            prevIndexNorm,                                                    // [25] podium index / n_starts
-            histKnown,                                                        // [26] has history
-        ];
-
-        // ── History sequence — MAX_HISTORY × 25, same order as ravimalli.js ─
-        const histSeq = [];
-
-        for (let i = 0; i < MAX_HISTORY; i++) {
-            const ps = validPrev[i];
-            if (!ps) { histSeq.push(new Array(25).fill(-1)); continue; }
-
-            const raceDateObj  = parseDate(raceDate);
-            const startDateObj = parseDate(ps.shortMeetDate || ps.meetDate);
-            const daysSince    = (raceDateObj && startDateObj)
-                ? Math.min(365, (raceDateObj - startDateObj) / 86400000)
-                : 30;
-
-            const { kmNum, isCarStart: psIsCarStart, isBreak } = parseKmTime(ps.kmTime);
-            const kmNorm  = normaliseKmTime(kmNum, ps.distance);
-            const kmKnown = kmNorm > 0 ? 1 : 0;
-            const kmFinal = kmKnown ? kmNorm / 100 : means[breed].km / 100;
-
-            const distKnown  = (ps.distance || 0) > 0 ? 1 : 0;
-            const distFinal  = distKnown ? ps.distance / 3100 : 0.67;
-
-            // firstPrize in Veikkaus API is in cents (e.g. 1000000 = 100 €)
-            const prize      = (parseFloat(ps.firstPrize) || 0) / 10000;
-            const prizeKnown = prize > 0 ? 1 : 0;
-            const prizeFinal = prizeKnown ? Math.log1p(prize) / 10 : 0.55;
-
-            // winOdd is ×10 (e.g. 152 = 15.2)
-            const odd      = (parseFloat(ps.winOdd) || 0) / 10;
-            const oddKnown = odd > 0 ? 1 : 0;
-            const oddFinal = oddKnown ? Math.log1p(odd) / 5 : 0.50;
-
-            const { position, disqualified, DNF } = parsePosition(ps.result);
-            const posKnown = position != null && position > 0 ? 1 : 0;
-            const posFinal = posKnown ? position / 20 : 0.5;
-
-            const psfront = (ps.frontShoes  || '').toUpperCase();
-            const psrear  = (ps.rearShoes   || '').toUpperCase();
-            const pscart  = (ps.specialCart || '').toUpperCase();
-
-            histSeq.push([
-                kmFinal,    kmKnown,                                           // [0-1]   km time (normalised)
-                distFinal,  distKnown,                                         // [2-3]   distance
-                daysSince / 365,                                               // [4]     days since start
-                posFinal,   posKnown,                                          // [5-6]   finishing position
-                prizeFinal, prizeKnown,                                        // [7-8]   prize money (log)
-                oddFinal,   oddKnown,                                          // [9-10]  win odds (log)
-                psIsCarStart ? 1 : 0,                                          // [11]    car start
-                isBreak      ? 1 : 0,                                          // [12]    gait fault
-                (ps.startTrack ?? 1) / 30,                                     // [13]    start position
-                getID(driverMap, ps.driverFullName || ps.driver, 'driver') / 3000, // [14] driver ID
-                getID(trackMap,  ps.trackCode || ps.track, 'track') / 500,  // [15]    track ID
-                disqualified ? 1 : 0,                                          // [16]    disqualified
-                DNF          ? 1 : 0,                                          // [17]    did not finish
-                psfront === 'HAS_SHOES' ? 1 : 0,                               // [18]    front shoes on
-                (psfront === 'HAS_SHOES' || psfront === 'NO_SHOES') ? 1 : 0,   // [19]    front shoes known
-                psrear  === 'HAS_SHOES' ? 1 : 0,                               // [20]    rear shoes on
-                (psrear  === 'HAS_SHOES' || psrear  === 'NO_SHOES') ? 1 : 0,   // [21]    rear shoes known
-                pscart  === 'YES' ? 1 : 0,                                     // [22]    special cart on
-                (pscart  === 'YES' || pscart  === 'NO') ? 1 : 0,               // [23]    special cart known
-                encodeTrackCondition(ps.trackCondition),                       // [24]    track condition
-            ]);
-        }
-
-        X_hist.push(histSeq);
-        X_static.push(staticFeats);
-        metadata.push({ number: runner.number, name: runner.name, driver: runner.driver });
-    }
-
-    return { X_hist, X_static, metadata };
-}
-
-// ─── JSON FETCH — with explicit error for missing public/ files ────────────────
-
-async function fetchJSON(path) {
-    const res = await fetch(path);
-    if (!res.ok)
-        throw new Error(`HTTP ${res.status} — file not found: ${path}\nCopy the file to public/.`);
-    const text = await res.text();
-    if (text.trimStart().startsWith('<'))
-        throw new Error(`Server returned HTML instead of JSON for: ${path}\nFile is missing from public/.`);
-    return JSON.parse(text);
-}
+const MODEL_VARIANTS = {
+    runner: {
+        id:           'runner',
+        label:        'Runner-based',
+        description:  'LSTM + Dense  ·  27 static features  ·  tensor: [n_runners, 8, 25]',
+        modelPath:    '/ravimalli-mixed/model_full.json',
+        mappingsPath: '/mappings.json',
+        buildFeatures: buildRunnerBasedFeatures,
+        extractScores: (scores, metadata) =>
+            metadata.map((m, i) => ({ ...m, prob: scores[i] })),
+    },
+    race: {
+        id:           'race',
+        label:        'Race-based',
+        description:  'TimeDistributed LSTM + Attention  ·  25 static features  ·  tensor: [1, 18, 8, 25]',
+        modelPath:    '/ravimalli-race/model_full.json',
+        mappingsPath: '/mappings_race.json',
+        buildFeatures: buildRaceBasedFeatures,
+        // Output shape [1, MAX_RUNNERS, 1] — index by runner slot
+        extractScores: (scores, metadata) =>
+            metadata.map(m => ({ ...m, prob: scores[m.slot] })),
+    },
+};
 
 // ─── APP ──────────────────────────────────────────────────────────────────────
 
 export default function App() {
-    const [cards,           setCards]           = useState([]);
-    const [races,           setRaces]           = useState([]);
-    const [selectedCard,    setSelectedCard]    = useState('');
-    const [selectedRace,    setSelectedRace]    = useState('');
-    const [loadingCards,    setLoadingCards]    = useState(false);
-    const [loadingRaces,    setLoadingRaces]    = useState(false);
-    const [loadingPred,     setLoadingPred]     = useState(false);
-    const [predictions,     setPredictions]     = useState([]);
-    const [error,           setError]           = useState('');
-    const [model,           setModel]           = useState(null);
-    const [maps,            setMaps]            = useState(null);
-    const [modelInfo,       setModelInfo]       = useState(null);
-    const [modelStatus,     setModelStatus]     = useState('idle');
-    const [modalOpen,       setModalOpen]       = useState(false);
-    const [modalRaceId,     setModalRaceId]     = useState('');
-    const [modalRaceLabel,  setModalRaceLabel]  = useState('');
-    const [modalRace,       setModalRace]       = useState(null);
-    const [modalRunners,    setModalRunners]    = useState(null);
+    const [cards,          setCards]          = useState([]);
+    const [races,          setRaces]          = useState([]);
+    const [selectedCard,   setSelectedCard]   = useState('');
+    const [selectedRace,   setSelectedRace]   = useState('');
+    const [loadingCards,   setLoadingCards]   = useState(false);
+    const [loadingRaces,   setLoadingRaces]   = useState(false);
+    const [loadingPred,    setLoadingPred]    = useState(false);
+    const [predictions,    setPredictions]    = useState([]);
+    const [error,          setError]          = useState('');
+    const [modalOpen,      setModalOpen]      = useState(false);
+    const [modalRaceId,    setModalRaceId]    = useState('');
+    const [modalRaceLabel, setModalRaceLabel] = useState('');
+    const [modalRace,      setModalRace]      = useState(null);
+    const [modalRunners,   setModalRunners]   = useState(null);
+    const [activeVariant,  setActiveVariant]  = useState('runner');
 
-    // Load model + mappings once on mount
-    useEffect(() => {
-        (async () => {
-            setModelStatus('loading');
-            try {
-                const mappingsData = await fetchJSON('/mappings.json');
-                setMaps(mappingsData);
+    // Per-variant state: model weights + mappings + status
+    const [models, setModels] = useState({
+        runner: { model: null, maps: null, info: null, status: 'idle' },
+        race:   { model: null, maps: null, info: null, status: 'idle' },
+    });
 
-                const modelData = await fetchJSON('/ravimalli-mixed/model_full.json');
-                if (modelData.trainingInfo) setModelInfo(modelData.trainingInfo);
+    // ── Load a model variant (model weights + its own mappings file) ──────────
+    const loadVariant = useCallback(async (variantId) => {
+        if (['ready', 'loading'].includes(models[variantId].status)) return;
 
-                const binary  = atob(modelData.weightData);
-                const bytes   = new Uint8Array(binary.length);
-                for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+        const variant = MODEL_VARIANTS[variantId];
+        setModels(prev => ({ ...prev, [variantId]: { ...prev[variantId], status: 'loading' } }));
 
-                const loaded = await tf.loadLayersModel(tf.io.fromMemory({
-                    modelTopology: modelData.modelTopology,
-                    weightSpecs:   modelData.weightSpecs,
-                    weightData:    bytes.buffer,
-                }));
-                setModel(loaded);
-                setModelStatus('ready');
-            } catch (e) {
-                console.error('Model load failed:', e);
-                setError(e.message);
-                setModelStatus('error');
-            }
-        })();
-    }, []);
+        try {
+            // Load model weights and mappings in parallel
+            const [modelData, mapsData] = await Promise.all([
+                fetchJSON(variant.modelPath),
+                fetchJSON(variant.mappingsPath),
+            ]);
 
-    // Fetch today's race cards
+            const info   = modelData.trainingInfo || null;
+            const binary = atob(modelData.weightData);
+            const bytes  = new Uint8Array(binary.length);
+            for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+
+            const loaded = await tf.loadLayersModel(tf.io.fromMemory({
+                modelTopology: modelData.modelTopology,
+                weightSpecs:   modelData.weightSpecs,
+                weightData:    bytes.buffer,
+            }));
+
+            setModels(prev => ({
+                ...prev,
+                [variantId]: { model: loaded, maps: mapsData, info, status: 'ready' },
+            }));
+        } catch (e) {
+            console.error(`Model load failed (${variantId}):`, e);
+            setModels(prev => ({
+                ...prev,
+                [variantId]: { ...prev[variantId], status: 'error' },
+            }));
+            setError(e.message);
+        }
+    }, [models]);
+
+    // Load default variant on mount
+    useEffect(() => { loadVariant('runner'); }, []);
+
+    // ── Switch active variant ─────────────────────────────────────────────────
+    const handleVariantChange = useCallback((variantId) => {
+        setActiveVariant(variantId);
+        setPredictions([]);
+        setError('');
+        loadVariant(variantId);
+    }, [loadVariant]);
+
+    // ── Fetch today's race cards ───────────────────────────────────────────────
+    // Endpoint: /api/toto-info/v1/cards/today → collection[i]
     useEffect(() => {
         setLoadingCards(true);
         fetch('/api-veikkaus/api/toto-info/v1/cards/today')
@@ -395,7 +126,9 @@ export default function App() {
             .finally(() => setLoadingCards(false));
     }, []);
 
-    // Fetch races when a card is selected
+    // ── Fetch races when card selected ────────────────────────────────────────
+    // Endpoint: /api/toto-info/v1/card/{cardId}/races → collection[i]
+    // Fields used: collection[i].raceId, .distance, .breed, .startType, .startTime
     useEffect(() => {
         if (!selectedCard) { setRaces([]); return; }
         setLoadingRaces(true);
@@ -408,97 +141,106 @@ export default function App() {
             .finally(() => setLoadingRaces(false));
     }, [selectedCard]);
 
-    // Run prediction for the selected race
+    // ── Run prediction ────────────────────────────────────────────────────────
     const runPrediction = useCallback(async () => {
-        if (!selectedCard || !selectedRace || !model || !maps) return;
+        const variant    = MODEL_VARIANTS[activeVariant];
+        const modelState = models[activeVariant];
+        if (!selectedRace || modelState.status !== 'ready') return;
+
         setLoadingPred(true);
         setError('');
         setPredictions([]);
 
         try {
-            const cardData   = await fetch(`/api-veikkaus/api/toto-info/v1/card/${selectedCard}`).then(r => r.json());
-            const raceDate   = sanitize(cardData.meetDate || cardData.date || '');
+            // raceInfo comes from /card/{cardId}/races collection[i]
+            const raceInfo = races.find(r => String(r.raceId) === String(selectedRace));
+            if (!raceInfo) throw new Error('Race not found in card data');
 
-            const raceInfo   = races.find(r => String(r.number) === String(selectedRace));
-            if (!raceInfo) throw new Error('Race not found');
+            // collection[i].raceId → used for runners endpoint
+            const raceId = String(raceInfo.raceId);
 
-            const raceId      = String(raceInfo.raceId || raceInfo.id);
+            // collection[i].distance
             const raceDistance = parseInt(raceInfo.distance || 2100);
-            const isCarStart   = (raceInfo.startType === 'CAR_START' || raceInfo.startType === 'AUTO');
 
+            // collection[i].startType: 'CAR_START' → true
+            const isCarStart = raceInfo.startType === 'CAR_START';
+
+            // collection[i].breed: 'K' → Finnhorse (cold blood)
+            const isColdBlood = detectColdBlood(raceInfo);
+
+            // raceDate: from startTime (epoch ms) or fallback to today.
+            // Use local date parts to avoid UTC off-by-one on Finnish evenings.
+            const _rd   = raceInfo.startTime ? new Date(raceInfo.startTime) : new Date();
+            const raceDate = `${_rd.getFullYear()}-${String(_rd.getMonth()+1).padStart(2,'0')}-${String(_rd.getDate()).padStart(2,'0')}`;
+
+            // Runners: /race/{raceId}/runners → collection[j] or array
             const runnersRaw = await fetch(`/api-veikkaus/api/toto-info/v1/race/${raceId}/runners`).then(r => r.json());
-
             const runnersArr = Array.isArray(runnersRaw)
                 ? runnersRaw
-                : (runnersRaw.collection || runnersRaw.runners || runnersRaw.data || Object.values(runnersRaw));
+                : (runnersRaw.collection || runnersRaw.runners || Object.values(runnersRaw));
 
-            console.log('[runners] API response keys:', Object.keys(runnersRaw));
-            console.log('[runners] Found', runnersArr.length, 'entries before filter');
-            const isColdBlood  = detectColdBlood(raceInfo, runnersArr[0]);
+            console.log('[runners] raw keys:', Object.keys(runnersRaw));
+            console.log('[runners] count before filter:', runnersArr.length);
+            console.log(runnersRaw+'\n************************')
+            // Store raw data for modal
             setModalRunners({ raw: runnersRaw, race: raceInfo, isColdBlood });
 
-            // Normalise runner objects to internal shape
-            const runners = runnersArr
-                .filter(r => r.scratched !== true)
-                .map(r => {
-                    const { record, isAutoRecord } = parseRecord(r, isCarStart);
-                    return {
-                        number:            parseInt(r.startNumber || r.number || 0),
-                        name:              sanitize(r.horseName || r.name || ''),
-                        coach:             sanitize(r.coachName || r.trainerName || ''),
-                        driver:            sanitize(r.driverName || ''),
-                        age:               parseInt(r.horseAge || r.age || 0),
-                        gender:            encodeGender(r.gender),
-                        frontShoes:        encodeShoes(r.frontShoes),
-                        rearShoes:         encodeShoes(r.rearShoes),
-                        frontShoesChanged: r.frontShoesChanged === true,
-                        rearShoesChanged:  r.rearShoesChanged  === true,
-                        specialCart:       r.specialCart || 'UNKNOWN',
-                        scratched:         r.scratched   === true,
-                        record,
-                        isAutoRecord,
-                        bettingPct:        parseBettingPct(r),
-                        winPct:            parseWinPct(r),
-                        prevStarts:        r.prevStarts || [],
-                    };
-                });
-
-            console.log('[runners] After filter:', runners.length);
-
+            // Normalise runners: maps live API field names → schema field names
+            // Specifically handles:
+            //   r.startNumber (primary) / r.number (fallback)
+            //   r.specialChart (API typo, not r.specialCart)
+            //   r.gender: 'ORI'/'TAMMA'/'RUUNA' → 1/2/3
+            //   r.prevStarts[k]: shortMeetDate/driver/trackCode/startTrack/
+            //                    winOdd/firstprice → schema equivalents
+            const runners = normaliseRunners(runnersArr, isCarStart);
+            console.log(runners)
+            console.log('[runners] after normalise (non-scratched):', runners.length);
             if (runners.length === 0)
                 throw new Error(
-                    `No runners found in race.\nAPI keys: [${Object.keys(runnersRaw).join(', ')}]\n` +
-                    `Entries before filter: ${runnersArr.length}\nSee DevTools console for details.`
+                    `No valid runners found.\nAPI response keys: [${Object.keys(runnersRaw).join(', ')}]`
                 );
 
-            const { X_hist, X_static, metadata } = buildFeatures(
-                runners, maps, raceDate, raceDistance, isColdBlood, isCarStart
+            // Build feature tensors using the variant's own mappings
+            const { X_hist, X_static, X_mask, metadata } = variant.buildFeatures(
+                runners, modelState.maps, raceDate, raceDistance, isColdBlood, isCarStart
             );
-
-            const histTensor   = tf.tensor3d(X_hist);
-            const staticTensor = tf.tensor2d(X_static);
-            const pred         = model.predict([histTensor, staticTensor]);
-            const scores       = await pred.data();
-            histTensor.dispose();
-            staticTensor.dispose();
-            pred.dispose();
+            console.log(X_static);
+            // Run inference
+            let scores;
+            if (activeVariant === 'runner') {
+                const histT   = tf.tensor3d(X_hist);
+                const staticT = tf.tensor2d(X_static);
+                const pred    = modelState.model.predict([histT, staticT]);
+                scores        = await pred.data();
+                histT.dispose(); staticT.dispose(); pred.dispose();
+            } else {
+                // X_hist: [1, MAX_RUNNERS, 8, 25]   X_static: [1, MAX_RUNNERS, 25]   X_mask: [1, MAX_RUNNERS, 1]
+                const histT   = tf.tensor4d(X_hist);
+                const staticT = tf.tensor3d(X_static);
+                const maskT   = tf.tensor3d(X_mask);
+                const pred    = modelState.model.predict([histT, staticT, maskT]);
+                scores        = await pred.data();   // flat: MAX_RUNNERS values
+                histT.dispose(); staticT.dispose(); maskT.dispose(); pred.dispose();
+            }
 
             setPredictions(
-                metadata
-                    .map((m, i) => ({ number: m.number, name: m.name, driver: m.driver, prob: scores[i] }))
+                variant.extractScores(scores, metadata)
                     .sort((a, b) => b.prob - a.prob)
             );
         } catch (e) {
             console.error(e);
-            setError(e.message || 'Unknown error');
+            setError(e.message || 'Unknown error during prediction');
         } finally {
             setLoadingPred(false);
         }
-    }, [selectedCard, selectedRace, model, maps, races]);
+    }, [selectedCard, selectedRace, models, activeVariant, races]);
 
-    const statusColor  = { idle: '#888', loading: '#f0a500', ready: '#2ecc71', error: '#e74c3c' };
-    const statusLabel  = { idle: 'Idle', loading: 'Loading model…', ready: 'Model ready', error: 'Load error' };
-    const canRun       = selectedRace && modelStatus === 'ready' && !loadingPred;
+    // ── Derived ───────────────────────────────────────────────────────────────
+    const activeModelState = models[activeVariant];
+    const canRun = selectedRace && activeModelState.status === 'ready' && !loadingPred;
+
+    const statusColor = { idle: '#888', loading: '#f0a500', ready: '#2ecc71', error: '#e74c3c' };
+    const statusLabel = { idle: 'Idle', loading: 'Loading…', ready: 'Model ready', error: 'Load error' };
 
     return (
         <div style={{ minHeight: '100vh', background: '#1a1a1a', boxSizing: 'border-box', padding: '40px 24px' }}>
@@ -511,41 +253,68 @@ export default function App() {
                     <div style={{ fontSize: 11, letterSpacing: 4, color: '#4a90d9', textTransform: 'uppercase', marginBottom: 6 }}>
                         Toto Prediction System
                     </div>
-                    <div style={{ display: 'flex', alignItems: 'baseline', gap: 14 }}>
-                        <h1 style={{ margin: 0, fontSize: 26, fontWeight: 700, color: '#fff', letterSpacing: -0.5 }}>
-                            RaviMalli v5
-                        </h1>
-                        <span style={{ fontSize: 13, color: '#486388', letterSpacing: 0.5 }}>
-                            Mixed model: LSTM (history branch) + Dense (static branch)
-                        </span>
+                    <h1 style={{ margin: 0, fontSize: 26, fontWeight: 700, color: '#fff', letterSpacing: -0.5 }}>
+                        TotoModels v2
+                    </h1>
+
+                    {/* ── Model selector ── */}
+                    <div style={{ marginTop: 14, display: 'flex', gap: 20, alignItems: 'center', flexWrap: 'wrap' }}>
+                        {Object.values(MODEL_VARIANTS).map(v => {
+                            const vState   = models[v.id];
+                            const isActive = activeVariant === v.id;
+                            return (
+                                <label key={v.id} style={{ display: 'flex', alignItems: 'flex-start', gap: 8,
+                                    cursor: 'pointer', opacity: isActive ? 1 : 0.5, transition: 'opacity 0.2s' }}>
+                                    <input type="checkbox" checked={isActive}
+                                           onChange={() => handleVariantChange(v.id)}
+                                           style={{ marginTop: 2, accentColor: '#4a90d9' }} />
+                                    <div>
+                                        <div style={{ fontSize: 13, fontWeight: 600, color: isActive ? '#e8eaf0' : '#a3a3d8' }}>
+                                            {v.label}
+                                            {vState.status === 'loading' && <span style={{ color: '#f0a500', marginLeft: 8, fontSize: 11 }}>loading…</span>}
+                                            {vState.status === 'error'   && <span style={{ color: '#e74c3c', marginLeft: 8, fontSize: 11 }}>load error</span>}
+                                        </div>
+                                        <div style={{ fontSize: 10, color: '#6a6a9e', letterSpacing: 0.3, marginTop: 1 }}>
+                                            {v.description}
+                                        </div>
+                                    </div>
+                                </label>
+                            );
+                        })}
                     </div>
 
+                    {/* ── Model info ── */}
                     <div style={{ marginTop: 10, display: 'flex', flexWrap: 'wrap', gap: 16, alignItems: 'center', fontSize: 12 }}>
                         <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                             <span style={{ width: 8, height: 8, borderRadius: '50%', display: 'inline-block',
-                                background: statusColor[modelStatus], boxShadow: `0 0 6px ${statusColor[modelStatus]}` }} />
-                            <span style={{ color: statusColor[modelStatus] }}>{statusLabel[modelStatus]}</span>
-                        </span>
-
-                        {modelInfo && (
-                            <span style={{ color: '#556', fontSize: 11, display: 'flex', gap: 14, flexWrap: 'wrap' }}>
-                                <span>Epoch <b style={{ color: '#aaa' }}>{modelInfo.epoch}</b></span>
-                                <span>val_loss <b style={{ color: '#aaa' }}>{modelInfo.val_loss}</b></span>
-                                <span>val_acc <b style={{ color: '#aaa' }}>{modelInfo.val_acc != null ? (modelInfo.val_acc * 100).toFixed(1) + '%' : '—'}</b></span>
-                                <span>LR <b style={{ color: '#aaa' }}>{modelInfo.learningRate}</b></span>
-                                <span style={{ borderLeft: '1px solid #222', paddingLeft: 14 }}>
-                                    Learning Data <b style={{ color: '#aaa' }}>{modelInfo.dataStartDate} → {modelInfo.dataEndDate}</b>
-                                </span>
-                                <span>races <b style={{ color: '#aaa' }}>{(modelInfo.totalRaces ?? modelInfo.totalRows)?.toLocaleString('fi-FI')}</b></span>
-                                <span style={{ color: '#333' }}>·</span>
-                                <span>runners <b style={{ color: '#aaa' }}>{(modelInfo.totalRunners ?? modelInfo.totalStarts)?.toLocaleString('fi-FI')}</b></span>
+                                background: statusColor[activeModelState.status],
+                                boxShadow: `0 0 6px ${statusColor[activeModelState.status]}` }} />
+                            <span style={{ color: statusColor[activeModelState.status] }}>
+                                {statusLabel[activeModelState.status]}
                             </span>
-                        )}
+                        </span>
+                        {activeModelState.info && (() => {
+                            const info = activeModelState.info;
+                            return (
+                                <span style={{ color: '#556', fontSize: 11, display: 'flex', gap: 14, flexWrap: 'wrap' }}>
+                                    <span>Epoch <b style={{ color: '#aaa' }}>{info.epoch}</b></span>
+                                    <span>val_loss <b style={{ color: '#aaa' }}>{info.val_loss}</b></span>
+                                    <span>val_acc <b style={{ color: '#aaa' }}>{info.val_acc != null ? (info.val_acc * 100).toFixed(1) + '%' : '—'}</b></span>
+                                    <span>LR <b style={{ color: '#aaa' }}>{info.learningRate}</b></span>
+                                    <span style={{ borderLeft: '1px solid #222', paddingLeft: 14 }}>
+                                        Data <b style={{ color: '#aaa' }}>{info.dataStartDate} → {info.dataEndDate}</b>
+                                    </span>
+                                    <span>races <b style={{ color: '#aaa' }}>{info.totalRaces?.toLocaleString('fi-FI')}</b></span>
+                                    <span style={{ color: '#333' }}>·</span>
+                                    <span>runners <b style={{ color: '#aaa' }}>{info.totalRunners?.toLocaleString('fi-FI')}</b></span>
+                                </span>
+                            );
+                        })()}
                     </div>
                 </div>
 
-                {/* ── Model load error ── */}
-                {modelStatus === 'error' && error && (
+                {/* ── Error box ── */}
+                {error && (
                     <div style={{ padding: '12px 16px', background: '#1a0a0a', border: '1px solid #e74c3c',
                         borderRadius: 4, color: '#e74c3c', fontSize: 12, marginBottom: 24, whiteSpace: 'pre-wrap' }}>
                         ✗ {error}
@@ -568,10 +337,13 @@ export default function App() {
                     <div>
                         <label style={labelStyle}>Race</label>
                         <select value={selectedRace} onChange={e => setSelectedRace(e.target.value)}
-                                disabled={!selectedCard || loadingRaces} style={{ ...selectStyle, minWidth: 160 }}>
-                            <option value="">{loadingRaces ? '…' : '—'}</option>
+                                disabled={!selectedCard || loadingRaces} style={{ ...selectStyle, minWidth: 180 }}>
+                            <option value="">{loadingRaces ? '…' : '— Select race —'}</option>
                             {races.map(r => (
-                                <option key={r.raceId} value={r.number}>Race {r.number} · {r.distance}m</option>
+                                // value is raceId (not race number) — used to find raceInfo later
+                                <option key={r.raceId} value={r.raceId}>
+                                    Race {r.number} · {r.distance}m · {r.startType === 'CAR_START' ? 'Auto' : 'Voltti'}
+                                </option>
                             ))}
                         </select>
                     </div>
@@ -589,37 +361,29 @@ export default function App() {
 
                     {selectedRace && (
                         <button onClick={() => {
-                            const race = races.find(r => String(r.number) === String(selectedRace));
+                            const race = races.find(r => String(r.raceId) === String(selectedRace));
                             if (!race) return;
-                            setModalRaceId(String(race.raceId || race.id));
-                            setModalRaceLabel(`Race ${selectedRace} · ${race.distance}m`);
+                            setModalRaceId(String(race.raceId));
+                            setModalRaceLabel(`Race ${race.number} · ${race.distance}m`);
                             setModalRace(race);
                             setModalOpen(true);
                         }} style={{
                             padding: '10px 20px', background: '#0f1520', color: '#4a90d9',
                             border: '1px solid #2a4060', borderRadius: 4,
                             fontFamily: 'inherit', fontSize: 13, letterSpacing: 1,
-                            cursor: 'pointer', transition: 'all 0.2s',
+                            cursor: 'pointer',
                         }}>
                             ⊞ Race details
                         </button>
                     )}
                 </div>
 
-                {/* ── Prediction error ── */}
-                {error && modelStatus !== 'error' && (
-                    <div style={{ padding: '12px 16px', background: '#1a0a0a', border: '1px solid #e74c3c',
-                        borderRadius: 4, color: '#e74c3c', fontSize: 13, marginBottom: 24 }}>
-                        ✗ {error}
-                    </div>
-                )}
-
-                {/* ── Results table ── */}
+                {/* ── Results ── */}
                 {predictions.length > 0 && (
                     <div>
                         <div style={{ fontSize: 11, letterSpacing: 2, color: '#4a90d9',
                             textTransform: 'uppercase', marginBottom: 12 }}>
-                            Prediction · Race {selectedRace}
+                            Prediction · {MODEL_VARIANTS[activeVariant].label}
                         </div>
                         <div style={{ overflowX: 'auto' }}>
                             <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
@@ -636,11 +400,11 @@ export default function App() {
                                 </thead>
                                 <tbody>
                                 {predictions.map((p, i) => (
-                                    <tr key={p.name} style={{ borderBottom: '1px solid #12151c',
+                                    <tr key={`${p.number}-${i}`} style={{ borderBottom: '1px solid #12151c',
                                         background: i === 0 ? '#0d1a2a' : i % 2 === 0 ? '#0f1118' : 'transparent' }}>
                                         <td style={{ padding: '10px 12px', color: i < 3 ? '#f0a500' : '#444' }}>
                                             {i < 3
-                                                ? <span style={{ fontSize: 26, lineHeight: 1 }}>{['①', '②', '③'][i]}</span>
+                                                ? <span style={{ fontSize: 26, lineHeight: 1 }}>{['①','②','③'][i]}</span>
                                                 : `#${i + 1}`}
                                         </td>
                                         <td style={{ padding: '10px 12px', color: '#666' }}>{p.number}</td>
@@ -658,12 +422,12 @@ export default function App() {
                                             {(1 / p.prob).toFixed(2)}
                                         </td>
                                         <td style={{ padding: '10px 12px' }}>
-                                                <span style={{ padding: '2px 10px', borderRadius: 3, fontSize: 11, letterSpacing: 1,
-                                                    background: p.prob > 0.5 ? '#0d2a1a' : '#111',
-                                                    color:      p.prob > 0.5 ? '#2ecc71'  : '#444',
-                                                    border: `1px solid ${p.prob > 0.5 ? '#2ecc71' : '#222'}` }}>
-                                                    {p.prob > 0.5 ? 'BET' : 'SKIP'}
-                                                </span>
+                                            <span style={{ padding: '2px 10px', borderRadius: 3, fontSize: 11, letterSpacing: 1,
+                                                background: p.prob > 0.5 ? '#0d2a1a' : '#111',
+                                                color:      p.prob > 0.5 ? '#2ecc71' : '#444',
+                                                border: `1px solid ${p.prob > 0.5 ? '#2ecc71' : '#222'}` }}>
+                                                {p.prob > 0.5 ? 'BET' : 'SKIP'}
+                                            </span>
                                         </td>
                                     </tr>
                                 ))}

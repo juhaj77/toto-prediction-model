@@ -14,7 +14,7 @@
 const fs    = require('fs');
 const https = require('https');
 
-const OUTPUT_FILE = './ravit_opetusdata.json';
+const OUTPUT_FILE = './Learning_Data.json';
 const BASE_URL    = 'https://www.veikkaus.fi/api/toto-info/v1';
 
 // ─── HTTP ─────────────────────────────────────────────────────────────────────
@@ -246,7 +246,7 @@ async function fetchDay(dateStr) {
                             rearShoes:      h.rearShoes   || null,
                             specialCart:    h.specialCart || null,
                             isCarStart:     psIsCarStart,
-                            break:          isBreak,
+                            isGallop:          isBreak,
                             disqualified,
                             DNF,
                             trackCondition: parseTrackCondition(h.trackCondition),
