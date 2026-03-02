@@ -302,7 +302,7 @@ export default function App() {
                                     <span>Epoch <b style={{ color: '#aaa' }}>{info.epoch}</b></span>
                                     <span>val_loss <b style={{ color: '#aaa' }}>{info.val_loss}</b></span>
                                     <span>val_acc <b style={{ color: '#aaa' }}>{info.val_acc != null ? (info.val_acc * 100).toFixed(1) + '%' : '—'}</b></span>
-                                    <span>LR <b style={{ color: '#aaa' }}>{info.learningRate}</b></span>
+                                    <span>val_auc <b style={{ color: '#aaa' }}>{info.val_auc != null ? (info.val_auc * 100).toFixed(1) + '%' : '—'}</b></span>
                                     <span style={{ borderLeft: '1px solid #222', paddingLeft: 14 }}>
                                         Data <b style={{ color: '#aaa' }}>{info.dataStartDate} → {info.dataEndDate}</b>
                                     </span>
