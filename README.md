@@ -26,7 +26,7 @@ Run `npm install` in both `model-learning` and `front-end`.
 
 Race data is appended to:
 
-`ravit_opetusdata.json`
+`Learning_Data.json`
 
 ⚠️ The Veikkaus API retains race data for approximately 10 days only.  
 To build a sufficiently large training dataset, run the scraper periodically.
