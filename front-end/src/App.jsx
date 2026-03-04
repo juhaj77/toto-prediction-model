@@ -6,18 +6,8 @@ import LearningCurves from './LearningCurves.jsx';
 import {
     sanitize, detectColdBlood, normaliseRunners,
     buildRunnerBasedFeatures, buildRaceBasedFeatures,
-    fetchJSON, MAX_RUNNERS,
+    fetchJSON, MAX_RUNNERS, filterValidPrev,
 } from './util.js';
-
-// TensorFlow.js backend initialisation is asynchronous. We must wait until the
-// desired backend is ready BEFORE loading models or running inference; otherwise
-// different refreshes may end up on different backends (e.g. WebGL vs CPU),
-// which can cause small numeric differences to amplify in the race-based model.
-// We'll gate the app’s ML actions behind a `tfReady` flag.
-
-// ─── MODEL REGISTRY ───────────────────────────────────────────────────────────
-// Runner-based uses mappings.json (model_runner.js writes it).
-// Race-based uses mappings_race.json (model_race.js writes it).
 
 const MODEL_VARIANTS = {
     runner: {
@@ -37,13 +27,10 @@ const MODEL_VARIANTS = {
         modelPath:    '/model-race/model.json',
         mappingsPath: '/mappings_race.json',
         buildFeatures: buildRaceBasedFeatures,
-        // Output shape [1, MAX_RUNNERS, 1] — index by runner slot
         extractScores: (scores, metadata) =>
             metadata.map(m => ({ ...m, prob: scores[m.slot] })),
     },
 };
-
-// ─── APP ──────────────────────────────────────────────────────────────────────
 
 export default function App() {
     const [tfReady, setTfReady] = useState(false);
@@ -63,13 +50,13 @@ export default function App() {
     const [modalRunners,   setModalRunners]   = useState(null);
     const [activeVariant,  setActiveVariant]  = useState('runner');
 
-    // Per-variant state: model weights + mappings + status
+    const [histStatus, setHistStatus] = useState({ loading: false, status: null, withHist: 0, total: 0, error: null });
+
     const [models, setModels] = useState({
         runner: { model: null, maps: null, info: null, status: 'idle' },
         race:   { model: null, maps: null, info: null, status: 'idle' },
     });
 
-    // Initialise TF backend deterministically (CPU) and register custom layers
     useEffect(() => {
         let cancelled = false;
         (async () => {
@@ -82,7 +69,6 @@ export default function App() {
                 await tf.ready();
                 if (cancelled) return;
                 console.info('[tf] backend ready:', tf.getBackend());
-                // Register the custom layer AFTER TF is ready
                 registerMultiHeadAttention();
                 setTfReady(true);
             } catch (e) {
@@ -92,16 +78,14 @@ export default function App() {
         return () => { cancelled = true; };
     }, []);
 
-    // ── Load a model variant (model weights + its own mappings file) ──────────
     const loadVariant = useCallback(async (variantId) => {
-        if (!tfReady) return; // wait until backend ready
+        if (!tfReady) return;
         if (['ready', 'loading'].includes(models[variantId].status)) return;
 
         const variant = MODEL_VARIANTS[variantId];
         setModels(prev => ({ ...prev, [variantId]: { ...prev[variantId], status: 'loading' } }));
 
         try {
-            // Load model weights and mappings in parallel
             const [modelData, mapsData] = await Promise.all([
                 fetchJSON(variant.modelPath),
                 fetchJSON(variant.mappingsPath),
@@ -117,7 +101,7 @@ export default function App() {
                 weightSpecs:   modelData.weightSpecs,
                 weightData:    bytes.buffer,
             }));
-            const allWeights = loaded.getWeights(false); // false = include non-trainable
+            const allWeights = loaded.getWeights(false);
             const wSum = tf.tidy(() => tf.addN(allWeights.map(w => w.abs().sum())));
             wSum.data().then(d => {
                 console.log(`[${variantId}] weight checksum (all layers):`, d[0].toFixed(4), `(${allWeights.length} weight tensors)`);
@@ -138,23 +122,19 @@ export default function App() {
         }
     }, [models, tfReady]);
 
-    // Load default variant once TF is ready
     useEffect(() => {
         if (tfReady && models.runner.status === 'idle') {
             loadVariant('runner');
         }
     }, [tfReady, loadVariant, models.runner.status]);
 
-    // ── Switch active variant ─────────────────────────────────────────────────
     const handleVariantChange = useCallback((variantId) => {
         setActiveVariant(variantId);
         setPredictions([]);
         setError('');
-        loadVariant(variantId); // loadVariant is TF-ready guarded
+        loadVariant(variantId);
     }, [loadVariant]);
 
-    // ── Fetch today's race cards ───────────────────────────────────────────────
-    // Endpoint: /api/toto-info/v1/cards/today → collection[i]
     useEffect(() => {
         setLoadingCards(true);
         fetch('/api-veikkaus/api/toto-info/v1/cards/today')
@@ -164,9 +144,6 @@ export default function App() {
             .finally(() => setLoadingCards(false));
     }, []);
 
-    // ── Fetch races when card selected ────────────────────────────────────────
-    // Endpoint: /api/toto-info/v1/card/{cardId}/races → collection[i]
-    // Fields used: collection[i].raceId, .distance, .breed, .startType, .startTime
     useEffect(() => {
         if (!selectedCard) { setRaces([]); return; }
         setLoadingRaces(true);
@@ -179,7 +156,39 @@ export default function App() {
             .finally(() => setLoadingRaces(false));
     }, [selectedCard]);
 
-    // ── Run prediction ────────────────────────────────────────────────────────
+    useEffect(() => {
+        setHistStatus({ loading: false, status: null, withHist: 0, total: 0, error: null });
+        if (!selectedRace) return;
+        const raceInfo = races.find(r => String(r.raceId) === String(selectedRace));
+        if (!raceInfo) return;
+        const raceId = String(raceInfo.raceId);
+        const isCarStart = raceInfo.startType === 'CAR_START';
+        let cancelled = false;
+        (async () => {
+            try {
+                setHistStatus(prev => ({ ...prev, loading: true, error: null }));
+                const runnersRaw = await fetch(`/api-veikkaus/api/toto-info/v1/race/${raceId}/runners`).then(r => r.json());
+                const runnersArr = Array.isArray(runnersRaw)
+                    ? runnersRaw
+                    : (runnersRaw.collection || runnersRaw.runners || Object.values(runnersRaw));
+                const runners = normaliseRunners(runnersArr, isCarStart);
+                const starters = runners.filter(r => !r.scratched);
+                const total = starters.length;
+                let withHist = 0;
+                for (const r of starters) {
+                    const validPrev = filterValidPrev(r.prevStarts);
+                    if (validPrev.length > 0) withHist++;
+                }
+                const status = total === 0 ? null : (withHist === 0 ? 'none' : (withHist < total ? 'partial' : 'complete'));
+                if (!cancelled) setHistStatus({ loading: false, status, withHist, total, error: null });
+            } catch (e) {
+                console.error('[history-check] failed', e);
+                if (!cancelled) setHistStatus({ loading: false, status: null, withHist: 0, total: 0, error: String(e) });
+            }
+        })();
+        return () => { cancelled = true; };
+    }, [selectedRace, races]);
+
     const runPrediction = useCallback(async () => {
         if (!tfReady) { console.warn('[tf] not ready yet'); return; }
         const variant    = MODEL_VARIANTS[activeVariant];
@@ -191,28 +200,17 @@ export default function App() {
         setPredictions([]);
 
         try {
-            // raceInfo comes from /card/{cardId}/races collection[i]
             const raceInfo = races.find(r => String(r.raceId) === String(selectedRace));
             if (!raceInfo) throw new Error('Race not found in card data');
 
-            // collection[i].raceId → used for runners endpoint
             const raceId = String(raceInfo.raceId);
-
-            // collection[i].distance
             const raceDistance = parseInt(raceInfo.distance || 2100);
-
-            // collection[i].startType: 'CAR_START' → true
             const isCarStart = raceInfo.startType === 'CAR_START';
-
-            // collection[i].breed: 'K' → Finnhorse (cold blood)
             const isColdBlood = detectColdBlood(raceInfo);
 
-            // raceDate: from startTime (epoch ms) or fallback to today.
-            // Use local date parts to avoid UTC off-by-one on Finnish evenings.
             const _rd   = raceInfo.startTime ? new Date(raceInfo.startTime) : new Date();
             const raceDate = `${_rd.getFullYear()}-${String(_rd.getMonth()+1).padStart(2,'0')}-${String(_rd.getDate()).padStart(2,'0')}`;
 
-            // Runners: /race/{raceId}/runners → collection[j] or array
             const runnersRaw = await fetch(`/api-veikkaus/api/toto-info/v1/race/${raceId}/runners`).then(r => r.json());
             const runnersArr = Array.isArray(runnersRaw)
                 ? runnersRaw
@@ -221,16 +219,8 @@ export default function App() {
             console.log('[runners] raw keys:', Object.keys(runnersRaw));
             console.log('[runners] count before filter:', runnersArr.length);
             console.log(runnersRaw+'\n************************')
-            // Store raw data for modal
             setModalRunners({ raw: runnersRaw, race: raceInfo, isColdBlood });
 
-            // Normalise runners: maps live API field names → schema field names
-            // Specifically handles:
-            //   r.startNumber (primary) / r.number (fallback)
-            //   r.specialChart (API typo, not r.specialCart)
-            //   r.gender: 'ORI'/'TAMMA'/'RUUNA' → 1/2/3
-            //   r.prevStarts[k]: shortMeetDate/driver/trackCode/startTrack/
-            //                    winOdd/firstprice → schema equivalents
             const runners = normaliseRunners(runnersArr, isCarStart);
 
             console.log('[runners] after normalise (non-scratched):', runners.length);
@@ -239,23 +229,21 @@ export default function App() {
                     `No valid runners found.\nAPI response keys: [${Object.keys(runnersRaw).join(', ')}]`
                 );
 
-            // Build feature tensors using the variant's own mappings
             const { X_hist, X_static, X_mask, metadata } = variant.buildFeatures(
                 runners, modelState.maps, raceDate, raceDistance, isColdBlood, isCarStart
             );
 
-            // DATA CHECKSUM FOR DEBUGGING
             if (activeVariant === 'runner') {
-                const histT = tf.tensor3d(X_hist);      // [n, 8, 25]
-                const staticT = tf.tensor2d(X_static);  // [n, 27]
+                const histT = tf.tensor3d(X_hist);
+                const staticT = tf.tensor2d(X_static);
                 const xx = tf.tidy(() => tf.add(histT.abs().sum(), staticT.abs().sum()));
                 const xHash = (await xx.data())[0];
                 console.log('[X checksum runner]', xHash.toFixed(6), 'shapes:', histT.shape, staticT.shape);
                 histT.dispose(); staticT.dispose(); xx.dispose();
             } else {
-                const histT = tf.tensor4d(X_hist);      // [1, MAX_RUNNERS, 8, 25]
-                const staticT = tf.tensor3d(X_static);  // [1, MAX_RUNNERS, 25]
-                const maskT = tf.tensor3d(X_mask);      // [1, MAX_RUNNERS, 1]
+                const histT = tf.tensor4d(X_hist);
+                const staticT = tf.tensor3d(X_static);
+                const maskT = tf.tensor3d(X_mask);
                 const xx = tf.tidy(() =>
                     tf.addN([histT.abs().sum(), staticT.abs().sum(), maskT.abs().sum()])
                 );
@@ -264,7 +252,6 @@ export default function App() {
                 histT.dispose(); staticT.dispose(); maskT.dispose(); xx.dispose();
             }
 
-            // Run inference
             let scores;
             if (activeVariant === 'runner') {
                 const histT   = tf.tensor3d(X_hist);
@@ -273,12 +260,11 @@ export default function App() {
                 scores        = await pred.data();
                 histT.dispose(); staticT.dispose(); pred.dispose();
             } else {
-                // X_hist: [1, MAX_RUNNERS, 8, 25]   X_static: [1, MAX_RUNNERS, 25]   X_mask: [1, MAX_RUNNERS, 1]
                 const histT   = tf.tensor4d(X_hist);
                 const staticT = tf.tensor3d(X_static);
                 const maskT   = tf.tensor3d(X_mask);
                 const pred    = modelState.model.predict([histT, staticT, maskT]);
-                scores        = await pred.data();   // flat: MAX_RUNNERS values
+                scores        = await pred.data();
                 histT.dispose(); staticT.dispose(); maskT.dispose(); pred.dispose();
             }
 
@@ -294,7 +280,6 @@ export default function App() {
         }
     }, [selectedCard, selectedRace, models, activeVariant, races]);
 
-    // ── Derived ───────────────────────────────────────────────────────────────
     const activeModelState = models[activeVariant];
     const canRun = tfReady && selectedRace && activeModelState.status === 'ready' && !loadingPred;
 
@@ -316,7 +301,6 @@ export default function App() {
                         TotoModels v2
                     </h1>
 
-                    {/* ── Model selector ── */}
                     <div style={{ marginTop: 14, display: 'flex', gap: 20, alignItems: 'center', flexWrap: 'wrap' }}>
                         {Object.values(MODEL_VARIANTS).map(v => {
                             const vState   = models[v.id];
@@ -342,7 +326,6 @@ export default function App() {
                         })}
                     </div>
 
-                    {/* ── Model info ── */}
                     <div style={{ marginTop: 10, display: 'flex', flexWrap: 'wrap', gap: 16, alignItems: 'center', fontSize: 12 }}>
                         <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                             <span style={{ width: 8, height: 8, borderRadius: '50%', display: 'inline-block',
@@ -405,7 +388,6 @@ export default function App() {
                                 disabled={!selectedCard || loadingRaces} style={{ ...selectStyle, minWidth: 180 }}>
                             <option value="">{loadingRaces ? '…' : '— Select race —'}</option>
                             {races.map(r => (
-                                // value is raceId (not race number) — used to find raceInfo later
                                 <option key={r.raceId} value={r.raceId}>
                                     Race {r.number} · {r.distance}m · {r.startType === 'CAR_START' ? 'Auto' : 'Voltti'}
                                 </option>
@@ -424,6 +406,7 @@ export default function App() {
                         {loadingPred ? 'Running…' : '▶ Run prediction'}
                     </button>
 
+                    {/* ── Review input data nappi — ENNEN history-varoitusta ── */}
                     {selectedRace && (
                         <button onClick={() => {
                             const race = races.find(r => String(r.raceId) === String(selectedRace));
@@ -438,11 +421,40 @@ export default function App() {
                             fontFamily: 'inherit', fontSize: 13, letterSpacing: 1,
                             cursor: 'pointer',
                         }}>
-                            ⊞ Race details
+                            ⊞ Review input data
                         </button>
                     )}
-                </div>
 
+
+                </div>
+                {/* ── History warning — omalla rivillään flexBasis:100% ── */}
+                {selectedRace && (
+                    histStatus.loading || histStatus.status === 'none' || histStatus.status === 'partial'
+                ) && (
+                    <div style={{marginTop: 6, marginBottom: '2em', width: 'fit-content', fontSize: 12, display: 'block', alignItems: 'center', gap: 8 }}>
+                        {(() => {
+                            let color = '#888';
+                            let bg    = '#0f1118';
+                            let border= '#1e2330';
+                            let text  = 'Checking history data…';
+                            if (!histStatus.loading) {
+                                if (histStatus.status === 'none') {
+                                    color = '#e74c3c'; bg = '#1a0a0a'; border = '#4a1e1e';
+                                    text = 'No history data found for this race. Predictions may be unreliable.';
+                                } else if (histStatus.status === 'partial') {
+                                    color = '#f0a500'; bg = '#1a1505'; border = '#3a2e10';
+                                    text = `History available for ${histStatus.withHist}/${histStatus.total} runners. Predictions may be less reliable.`;
+                                }
+                            }
+                            return (
+                                <div title="Model performance improves with more history per runner."
+                                     style={{ padding: '6px 10px', background: bg, border: `1px solid ${border}`, borderRadius: 4, color }}>
+                                    {text}
+                                </div>
+                            );
+                        })()}
+                    </div>
+                )}
                 {/* ── Results ── */}
                 {predictions.length > 0 && (
                     <div>
