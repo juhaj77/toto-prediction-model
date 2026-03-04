@@ -14,20 +14,27 @@ import {
 // ── Metric configs per model variant ────────────────────────────────────────
 
 const RACE_METRICS = [
-    { key: 'loss',     label: 'loss (train)', color: '#e74c3c', dash: '4 2' },
-    { key: 'val_loss', label: 'val loss',     color: '#ff8c69', dash: '' },
-    { key: 'val_acc',  label: 'val acc',      color: '#4a90d9', dash: '' },
-    { key: 'val_r3',   label: 'val recall@3', color: '#2ecc71', dash: '' },
-    { key: 'val_p3',   label: 'val prec@3',   color: '#a8e063', dash: '3 2' },
-    { key: 'val_auc',  label: 'val AUC',      color: '#f0a500', dash: '' },
+    { key: 'loss',     label: 'loss (train)',     color: '#e74c3c', dash: '4 2' },
+    { key: 'val_loss', label: 'val loss',         color: '#ff8c69', dash: '' },
+    { key: 'val_logloss_race', label: 'val logloss (per-race)', color: '#ffb199', dash: '2 2' },
+    { key: 'val_acc',  label: 'val acc',          color: '#4a90d9', dash: '' },
+    { key: 'val_r3',   label: 'val recall@3',     color: '#2ecc71', dash: '' },
+    { key: 'val_p3',   label: 'val prec@3',       color: '#a8e063', dash: '3 2' },
+    { key: 'val_ndcg3',label: 'val NDCG@3',       color: '#ffd166', dash: '' },
+    { key: 'val_hit1', label: 'val Hit@1',        color: '#06d6a0', dash: '5 3' },
+    { key: 'val_ap_macro', label: 'val AP (macro per-race)', color: '#a78bfa', dash: '' },
+    { key: 'val_auc',  label: 'val AUC (ROC)',    color: '#f0a500', dash: '' },
 ];
 
 const RUNNER_METRICS = [
     { key: 'loss',     label: 'loss (train)', color: '#e74c3c', dash: '4 2' },
     { key: 'val_loss', label: 'val loss',     color: '#ff8c69', dash: '' },
+    { key: 'val_logloss_race', label: 'val logloss (per-race)', color: '#ffb199', dash: '2 2' },
     { key: 'val_acc',  label: 'val acc',      color: '#4a90d9', dash: '' },
     { key: 'val_auc',  label: 'val AUC',      color: '#f0a500', dash: '' },
     { key: 'val_ap',   label: 'val AP',       color: '#a78bfa', dash: '' },
+    { key: 'val_ndcg3',label: 'val NDCG@3',   color: '#ffd166', dash: '' },
+    { key: 'val_hit1', label: 'val Hit@1',    color: '#06d6a0', dash: '5 3' },
     { key: 'val_p05',  label: 'val prec@0.5', color: '#2ecc71', dash: '3 2' },
 ];
 

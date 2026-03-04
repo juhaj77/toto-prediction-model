@@ -12,13 +12,13 @@ Training data is scraped from [Veikkaus](https://www.veikkaus.fi).
 
 ## Project Structure
 
-- `model-learning/` – Data scraping and model training  
+- `model-training/` – Data scraping and model training  
 - `front-end/` – Prediction user interface  
 
 ---
 
 ## Install
-Run `npm install` in both `model-learning` and `front-end`.
+Run `npm install` in both `model-training` and `front-end`.
 
 ---
 
@@ -26,32 +26,33 @@ Run `npm install` in both `model-learning` and `front-end`.
 
 Race data is appended to:
 
-`Learning_Data.json`
+`training.json`
 
 ⚠️ The Veikkaus API retains race data for approximately 10 days only.  
 To build a sufficiently large training dataset, run the scraper periodically.
 
 ### Run the scraper
 
-From the `model-learning` directory:
+From the `model-training` directory:
 
 ```bash
 node scraper
 ```
 
-This appends new race data to `Learning_Data.json`.
+This appends new race data to `training_data.json`.
 
 ---
 
 ## Model Training
 
-From the `model-learning` directory:
+From the `model-training` directory:
 
 ```bash
-node model
+node model_runner
 ```
-
-This trains the mixed LSTM + Dense model.
+```bash
+node model_race
+```
 
 ---
 
@@ -59,13 +60,19 @@ This trains the mixed LSTM + Dense model.
 
 After training:
 
-1. Copy `mappings.json`  
+1. Copy `mappings_runner.json`  
    → to `front-end/public`
 
-2. Copy `model_full.json`  
-   from `ravimalli-mixed/`  
-   → to `front-end/public/ravimalli-mixed`
+2. Copy `model.json`  
+   from `model-runner/`  
+   → to `front-end/public/model-runner`
 
+3. Copy `mappings_race.json`  
+   → to `front-end/public`
+
+4. Copy `model.json`  
+   from `model-race/`  
+   → to `front-end/public/model-race`
 ---
 
 ## Running the Front-End

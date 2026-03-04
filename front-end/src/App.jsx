@@ -16,16 +16,16 @@ import {
 // We'll gate the app’s ML actions behind a `tfReady` flag.
 
 // ─── MODEL REGISTRY ───────────────────────────────────────────────────────────
-// Runner-based uses mappings.json (model.js writes it).
-// Race-based uses mappings_race.json (ravimalli-race.js writes it).
+// Runner-based uses mappings.json (model_runner.js writes it).
+// Race-based uses mappings_race.json (model_race.js writes it).
 
 const MODEL_VARIANTS = {
     runner: {
         id:           'runner',
         label:        'Runner-based',
         description:  'LSTM + Dense  ·  27 static features  ·  tensor: [n_runners, 8, 25]',
-        modelPath:    '/ravimalli-mixed/model_full.json',
-        mappingsPath: '/mappings.json',
+        modelPath:    '/model-runner/model.json',
+        mappingsPath: '/mappings_runner.json',
         buildFeatures: buildRunnerBasedFeatures,
         extractScores: (scores, metadata) =>
             metadata.map((m, i) => ({ ...m, prob: scores[i] })),
@@ -34,7 +34,7 @@ const MODEL_VARIANTS = {
         id:           'race',
         label:        'Race-based',
         description:  'TimeDistributed LSTM + Attention  ·  25 static features  ·  tensor: [1, 18, 8, 25]',
-        modelPath:    '/ravimalli-race/model_full.json',
+        modelPath:    '/model-race/model.json',
         mappingsPath: '/mappings_race.json',
         buildFeatures: buildRaceBasedFeatures,
         // Output shape [1, MAX_RUNNERS, 1] — index by runner slot
