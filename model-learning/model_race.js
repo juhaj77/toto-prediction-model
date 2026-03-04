@@ -188,6 +188,11 @@ function loadData(filePath) {
             }
         }
     }
+    let maxRunners = 0;
+    for(let i = 0; i < races.length; i++)
+        if(races[i].runners.length > maxRunners) maxRunners = races[i].runners.length;
+    console.log(`  Loaded ${races.length} races, calc max ${maxRunners} runners/race, in code: const MAX_RUNNERS = ${MAX_RUNNERS};`);
+
     const avg = arr => arr.length ? arr.reduce((a, b) => a + b) / arr.length : null;
     const means = {
         SH: { record: avg(breedStats.SH.records) ?? 28.0, km: avg(breedStats.SH.kmTimes) ?? 29.0 },
@@ -276,9 +281,9 @@ function loadData(filePath) {
             // The attention mechanism learns race-relative context instead.
             raceStatic.push([
                 (runner.number || 1) / 20,                                        // [0]  start number
-                getID(maps.coaches, runner.coach,  'coach')  / 2000,              // [1]  coach ID
+                getID(maps.coaches, runner.coach,  'coach')  / 6000,              // [1]  coach ID
                 (runner.record || means[breed].record) / 50,                      // [2]  race record (imputed if missing)
-                getID(maps.drivers, runner.driver, 'driver') / 3000,              // [3]  current driver ID
+                getID(maps.drivers, runner.driver, 'driver') / 5000,              // [3]  current driver ID
                 (runner.age || 5) / 15,                                           // [4]  age
                 (runner.gender || 2) / 3,                                         // [5]  gender (1=mare 2=gelding 3=stallion)
                 race.isColdBlood ? 1 : 0,                                         // [6]  cold blood breed
@@ -346,8 +351,8 @@ function loadData(filePath) {
                     ps.isCarStart   ? 1 : 0,                                       // [11]
                     ps.isGallop        ? 1 : 0,                                       // [12]
                     (ps.number ?? 1) / 30,                                         // [13]
-                    getID(maps.drivers, ps.driver, 'driver') / 3000,               // [14]
-                    getID(maps.tracks,  ps.track,  'track')  / 500,                // [15]
+                    getID(maps.drivers, ps.driver, 'driver') / 5000,               // [14]
+                    getID(maps.tracks,  ps.track,  'track')  / 600,                // [15]
                     ps.disqualified ? 1 : 0,                                       // [16]
                     ps.DNF          ? 1 : 0,                                       // [17]
                     psfront === 'HAS_SHOES' ? 1 : 0,                               // [18]

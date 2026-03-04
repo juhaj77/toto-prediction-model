@@ -370,8 +370,8 @@ export function buildHistorySequence(validPrev, raceDate, breed, means, driverMa
             ps.isCarStart   ? 1 : 0,                                       // [11]
             ps.break        ? 1 : 0,                                       // [12]
             (ps.number ?? 1) / 30,                                         // [13]  RataNro / startTrack
-            getID(driverMap, ps.driver, 'driver') / 3000,                  // [14]  ps.driver
-            getID(trackMap,  ps.track,  'track')  / 500,                   // [15]  ps.track / trackCode
+            getID(driverMap, ps.driver, 'driver') / 5000,                  // [14]  ps.driver
+            getID(trackMap,  ps.track,  'track')  / 600,                   // [15]  ps.track / trackCode
             ps.disqualified ? 1 : 0,                                       // [16]
             ps.DNF          ? 1 : 0,                                       // [17]
             psfront === 'HAS_SHOES' ? 1 : 0,                               // [18]
@@ -411,9 +411,9 @@ export function buildStaticFeatures(runner, opts) {
 
     const base = [
         (runner.number || 1) / 20,                                        // [0]
-        getID(coachMap,  runner.coach,  'coach')  / 2000,                 // [1]
+        getID(coachMap,  runner.coach,  'coach')  / 6000,                 // [1]
         (runner.record || means[breed].record) / 50,                      // [2]
-        getID(driverMap, runner.driver, 'driver') / 3000,                 // [3]
+        getID(driverMap, runner.driver, 'driver') / 5000,                 // [3]
         (runner.age || 5) / 15,                                           // [4]
         (runner.gender || 2) / 3,                                         // [5]  1=mare 2=gelding 3=stallion
         isColdBlood ? 1 : 0,                                              // [6]
@@ -500,7 +500,12 @@ export function buildRaceBasedFeatures(runners, maps, raceDate, raceDistance, is
     const { coachMap, driverMap, trackMap } = makeMaps(maps);
     const getID = makeGetID();
 
-    const starters  = runners.filter(r => !r.scratched);
+    // Deterministic runner ordering: always by start number ascending
+    const starters  = runners
+        .filter(r => !r.scratched)
+        .slice()
+        .sort((a, b) => (a.number || 999) - (b.number || 999));
+
     const raceHist  = [], raceStatic = [], raceMask = [], metadata = [];
 
     for (let slot = 0; slot < MAX_RUNNERS; slot++) {

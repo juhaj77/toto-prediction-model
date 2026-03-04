@@ -702,7 +702,6 @@ async function runTraining() {
                     val_auc: aucValNum,
                     val_ap:  apVal,
                     val_p05: p05ValNum,
-                    val_r05: r05ValNum,
                     recommended_threshold: tStar,
                     calibration: { type: 'temperature', T: calib.T },
                     pr_curve: sweep.prCurve, // optional; remove if file size is a concern

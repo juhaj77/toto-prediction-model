@@ -2,17 +2,18 @@ import React, { useState, useEffect, useCallback } from 'react';
 import RunnerModal from './RunnerModal.jsx';
 import * as tf from '@tensorflow/tfjs';
 import { registerMultiHeadAttention } from './MultiHeadAttention.js';
+import LearningCurves from './LearningCurves.jsx';
 import {
     sanitize, detectColdBlood, normaliseRunners,
     buildRunnerBasedFeatures, buildRaceBasedFeatures,
     fetchJSON, MAX_RUNNERS,
 } from './util.js';
-tf.setBackend('cpu').then(() => {
-    console.log("Backend asetettu: CPU");
-});
-// Register the custom layer ONCE at module load time, before any
-// tf.loadLayersModel() call. Safe to call multiple times.
-registerMultiHeadAttention();
+
+// TensorFlow.js backend initialisation is asynchronous. We must wait until the
+// desired backend is ready BEFORE loading models or running inference; otherwise
+// different refreshes may end up on different backends (e.g. WebGL vs CPU),
+// which can cause small numeric differences to amplify in the race-based model.
+// We'll gate the app’s ML actions behind a `tfReady` flag.
 
 // ─── MODEL REGISTRY ───────────────────────────────────────────────────────────
 // Runner-based uses mappings.json (model.js writes it).
@@ -45,6 +46,7 @@ const MODEL_VARIANTS = {
 // ─── APP ──────────────────────────────────────────────────────────────────────
 
 export default function App() {
+    const [tfReady, setTfReady] = useState(false);
     const [cards,          setCards]          = useState([]);
     const [races,          setRaces]          = useState([]);
     const [selectedCard,   setSelectedCard]   = useState('');
@@ -67,8 +69,32 @@ export default function App() {
         race:   { model: null, maps: null, info: null, status: 'idle' },
     });
 
+    // Initialise TF backend deterministically (CPU) and register custom layers
+    useEffect(() => {
+        let cancelled = false;
+        (async () => {
+            try {
+                await tf.ready();
+                const desired = 'cpu';
+                if (tf.getBackend() !== desired) {
+                    await tf.setBackend(desired);
+                }
+                await tf.ready();
+                if (cancelled) return;
+                console.info('[tf] backend ready:', tf.getBackend());
+                // Register the custom layer AFTER TF is ready
+                registerMultiHeadAttention();
+                setTfReady(true);
+            } catch (e) {
+                console.error('[tf] init failed:', e);
+            }
+        })();
+        return () => { cancelled = true; };
+    }, []);
+
     // ── Load a model variant (model weights + its own mappings file) ──────────
     const loadVariant = useCallback(async (variantId) => {
+        if (!tfReady) return; // wait until backend ready
         if (['ready', 'loading'].includes(models[variantId].status)) return;
 
         const variant = MODEL_VARIANTS[variantId];
@@ -91,7 +117,13 @@ export default function App() {
                 weightSpecs:   modelData.weightSpecs,
                 weightData:    bytes.buffer,
             }));
-
+            const allWeights = loaded.getWeights(false); // false = include non-trainable
+            const wSum = tf.tidy(() => tf.addN(allWeights.map(w => w.abs().sum())));
+            wSum.data().then(d => {
+                console.log(`[${variantId}] weight checksum (all layers):`, d[0].toFixed(4), `(${allWeights.length} weight tensors)`);
+                wSum.dispose();
+            });
+            console.log('[tf] backend during load:', tf.getBackend());
             setModels(prev => ({
                 ...prev,
                 [variantId]: { model: loaded, maps: mapsData, info, status: 'ready' },
@@ -104,17 +136,21 @@ export default function App() {
             }));
             setError(e.message);
         }
-    }, [models]);
+    }, [models, tfReady]);
 
-    // Load default variant on mount
-    useEffect(() => { loadVariant('runner'); }, []);
+    // Load default variant once TF is ready
+    useEffect(() => {
+        if (tfReady && models.runner.status === 'idle') {
+            loadVariant('runner');
+        }
+    }, [tfReady, loadVariant, models.runner.status]);
 
     // ── Switch active variant ─────────────────────────────────────────────────
     const handleVariantChange = useCallback((variantId) => {
         setActiveVariant(variantId);
         setPredictions([]);
         setError('');
-        loadVariant(variantId);
+        loadVariant(variantId); // loadVariant is TF-ready guarded
     }, [loadVariant]);
 
     // ── Fetch today's race cards ───────────────────────────────────────────────
@@ -145,6 +181,7 @@ export default function App() {
 
     // ── Run prediction ────────────────────────────────────────────────────────
     const runPrediction = useCallback(async () => {
+        if (!tfReady) { console.warn('[tf] not ready yet'); return; }
         const variant    = MODEL_VARIANTS[activeVariant];
         const modelState = models[activeVariant];
         if (!selectedRace || modelState.status !== 'ready') return;
@@ -195,7 +232,7 @@ export default function App() {
             //   r.prevStarts[k]: shortMeetDate/driver/trackCode/startTrack/
             //                    winOdd/firstprice → schema equivalents
             const runners = normaliseRunners(runnersArr, isCarStart);
-            console.log(runners)
+
             console.log('[runners] after normalise (non-scratched):', runners.length);
             if (runners.length === 0)
                 throw new Error(
@@ -206,7 +243,27 @@ export default function App() {
             const { X_hist, X_static, X_mask, metadata } = variant.buildFeatures(
                 runners, modelState.maps, raceDate, raceDistance, isColdBlood, isCarStart
             );
-            console.log(X_static);
+
+            // DATA CHECKSUM FOR DEBUGGING
+            if (activeVariant === 'runner') {
+                const histT = tf.tensor3d(X_hist);      // [n, 8, 25]
+                const staticT = tf.tensor2d(X_static);  // [n, 27]
+                const xx = tf.tidy(() => tf.add(histT.abs().sum(), staticT.abs().sum()));
+                const xHash = (await xx.data())[0];
+                console.log('[X checksum runner]', xHash.toFixed(6), 'shapes:', histT.shape, staticT.shape);
+                histT.dispose(); staticT.dispose(); xx.dispose();
+            } else {
+                const histT = tf.tensor4d(X_hist);      // [1, MAX_RUNNERS, 8, 25]
+                const staticT = tf.tensor3d(X_static);  // [1, MAX_RUNNERS, 25]
+                const maskT = tf.tensor3d(X_mask);      // [1, MAX_RUNNERS, 1]
+                const xx = tf.tidy(() =>
+                    tf.addN([histT.abs().sum(), staticT.abs().sum(), maskT.abs().sum()])
+                );
+                const xHash = (await xx.data())[0];
+                console.log('[X checksum race]', xHash.toFixed(6), 'shapes:', histT.shape, staticT.shape, maskT.shape);
+                histT.dispose(); staticT.dispose(); maskT.dispose(); xx.dispose();
+            }
+
             // Run inference
             let scores;
             if (activeVariant === 'runner') {
@@ -239,7 +296,7 @@ export default function App() {
 
     // ── Derived ───────────────────────────────────────────────────────────────
     const activeModelState = models[activeVariant];
-    const canRun = selectedRace && activeModelState.status === 'ready' && !loadingPred;
+    const canRun = tfReady && selectedRace && activeModelState.status === 'ready' && !loadingPred;
 
     const statusColor = { idle: '#888', loading: '#f0a500', ready: '#2ecc71', error: '#e74c3c' };
     const statusLabel = { idle: 'Idle', loading: 'Loading…', ready: 'Model ready', error: 'Load error' };
@@ -314,6 +371,12 @@ export default function App() {
                         })()}
                     </div>
                 </div>
+
+                {/* ── Learning curves ── */}
+                <LearningCurves
+                    info={activeModelState.info}
+                    variant={activeVariant}
+                />
 
                 {/* ── Error box ── */}
                 {error && (
