@@ -205,7 +205,7 @@ export default function LearningCurves({ info, variant }) {
                         color: 'inherit',
                     }}>+</span>
                 </span>
-                Model learning curves
+                Training and Validation Learning Curves
                 {hasData && (
                     <span style={{ color: '#2a3a4a', fontSize: 10 }}>
                         ({history.length} epoch{history.length !== 1 ? 's' : ''})
