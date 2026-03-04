@@ -39,7 +39,7 @@ From the `model-learning` directory:
 node scraper
 ```
 
-This appends new race data to `ravit_opetusdata.json`.
+This appends new race data to `Learning_Data.json`.
 
 ---
 
