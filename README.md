@@ -5,7 +5,8 @@ A two-model TensorFlow.js system for predicting Toto race outcomes. The project 
 - Runner Model (per-horse): learns the win/placing likelihood of each runner from its own history and static features.
 - Race Model (field-aware): refines per-runner scores by modeling interactions within a race field (which horses matter for each other) and outputs a score per runner.
 
-Training data is scraped from [Veikkaus](https://www.veikkaus.fi).
+Training data is scraped from [Veikkaus](https://www.veikkaus.fi). A working deployment of this project is available here:
+👉 [toto prediction system](https://toto-kesm.onrender.com)
 
 ---
 
@@ -102,10 +103,3 @@ From the `front-end` directory:
 ```bash
 npm run dev
 ```
-
----
-
-## Live Version
-
-A working deployment is available here:
-👉 [toto prediction system](https://toto-kesm.onrender.com)
