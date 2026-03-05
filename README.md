@@ -93,8 +93,6 @@ After training, copy artifacts as follows:
    from `model-race/`
    → to `front-end/public/model-race`
 
-Make sure the associated `*.bin` weight shard files are copied alongside each `model.json`.
-
 ---
 
 ## Running the Front-End
