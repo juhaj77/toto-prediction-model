@@ -1,14 +1,14 @@
 // ═══════════════════════════════════════════════════════════════════════════════
 // TOTO PREDICTION MODEL — model_race.js
 //
-// Reads: Learning_Data.json  (training)
+// Reads: training_data.json  (training)
 // Writes: model-race/model.json  (trained model weights)
 //         mappings.json                   (shared with runner-based model)
 //
 // Architecture: Race-based — TimeDistributed LSTM + Dense branches,
 //               Multi-Head Attention over the runner dimension.
 //
-// Key difference from model.js (runner-based):
+// Key difference from model_runner.js (runner-based):
 //   Tensors include the full race field as one unit so the model can learn
 //   within-race relationships between runners. Betting/win rank features are
 //   omitted — the attention mechanism learns race-relative context instead.

@@ -1,7 +1,7 @@
 // ═══════════════════════════════════════════════════════════════════════════════
 // TOTO PREDICTION MODEL — model_runner.js
 //
-// Reads:  Learning_Data.json  (training)
+// Reads:  training-data.json  (training)
 // Writes: model-runner/model.json  (trained model weights)
 //         mappings_runner.json                    (name → integer ID maps)
 //
@@ -15,7 +15,7 @@ const tf = require('@tensorflow/tfjs');
 const fs = require('fs');
 
 // References
-const TRAINING_DATA  = './Learning_Data.json';
+const TRAINING_DATA  = './training_data.json';
 const PREDICTION_DATA = '';
 const MAPPINGS_FILE  = './mappings_runner.json';
 const MODEL_FOLDER   = './model-runner';
