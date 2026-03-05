@@ -72,7 +72,7 @@ node model_runner
 node model_race
 ```
 
-Training scripts will save `model.json` plus weight shards and write feature mapping files used by the front-end.
+Training scripts will save `model.json` and write feature mapping files used by the front-end.
 
 ---
 
