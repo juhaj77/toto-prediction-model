@@ -476,9 +476,12 @@ export default function App() {
                 {/* ── Results ── */}
                 {predictions.length > 0 && (
                     <div>
-                        <div style={{ fontSize: 11, letterSpacing: 2, color: '#4a90d9',
-                            textTransform: 'uppercase', marginBottom: 12 }}>
-                            Prediction · {MODEL_VARIANTS[activeVariant].label}
+                        <div style={{ display: 'flex', flexDirection:'row', gap:'2em',alignItems: 'center', marginBottom: 12 }}>
+                            <div style={{ fontSize: 11, letterSpacing: 2, color: '#4a90d9',
+                                textTransform: 'uppercase' }}>
+                                Prediction · {MODEL_VARIANTS[activeVariant].label}
+                            </div>
+                            <span style={{fontSize: '11px', color: '#2e5883'}}>The probability refers to the likelihood that the competitor finishes in the top three.</span>
                         </div>
                         <div style={{ overflowX: 'auto' }}>
                             <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
