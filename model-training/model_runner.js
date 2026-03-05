@@ -1,7 +1,7 @@
 // ═══════════════════════════════════════════════════════════════════════════════
 // TOTO PREDICTION MODEL — model_runner.js
 //
-// Reads:  training-data.json  (training)
+// Reads:  training_data.json  (training)
 // Writes: model-runner/model.json  (trained model weights)
 //         mappings_runner.json                    (name → integer ID maps)
 //
