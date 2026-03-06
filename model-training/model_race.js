@@ -77,6 +77,59 @@ function aucRoc(yTrue, yPred) {
     return tf.tidy(() => tf.scalar(0));
 }
 
+// ─── LOSSES (race-based) ─────────────────────────────────────────────────────
+// Binary cross-entropy implemented explicitly (robust across tfjs versions)
+function bceLoss(yTrue, yPred) {
+    return tf.tidy(() => {
+        const eps = tf.scalar(1e-7);
+        const one = tf.scalar(1);
+        const p = yPred.clipByValue(1e-7, 1 - 1e-7);
+        const term1 = yTrue.mul(p.log());
+        const term2 = one.sub(yTrue).mul(one.sub(p).log());
+        const loss = term1.add(term2).neg().mean();
+        return loss;
+    });
+}
+
+// Soft Top‑K (K=3) auxiliary loss per race (mask‑free, differentiable).
+// Builds a soft target over runner slots and compares to a softmax over logits
+// derived from the model's sigmoid outputs. Avoids non‑diff ops (no Greater).
+function topKSoftAuxLoss(yTrue, yPred, K = 3, smooth = 0.1) {
+    return tf.tidy(() => {
+        // shapes: [batch, maxRunners, 1]
+        const yT = yTrue.squeeze([-1]);          // [b, r]
+        // Use clipped probabilities, then convert to logits for stable softmax
+        const p  = yPred.squeeze([-1]).clipByValue(1e-7, 1 - 1e-7); // [b, r]
+        const logits = p.log().sub(tf.scalar(1).sub(p).log());       // logit(p) = log(p/(1-p))
+
+        // Prediction distribution over runner slots (implicit masking via logits≈-inf for padded)
+        const q = tf.softmax(logits, 1);                              // [b, r]
+
+        // Target distribution: normalized positives with label smoothing.
+        // Distribute smoothing mass using a soft uniform derived from p itself (no thresholds),
+        // and stop gradients if available so targets don't backprop through p.
+        const pos = yT;                                               // [b, r]
+        const posDen = pos.sum(1, true).add(tf.scalar(1e-6));         // [b, 1]
+        const tHard = pos.div(posDen);                                // [b, r]
+        let uRaw = p.div(p.sum(1, true).add(tf.scalar(1e-6)));        // [b, r]
+        if (tf.stopGradient) uRaw = tf.stopGradient(uRaw);
+        const t = tHard.mul(tf.scalar(1 - smooth)).add(uRaw.mul(tf.scalar(smooth)));
+
+        // Cross-entropy between t and q
+        const ce = t.mul(q.add(tf.scalar(1e-7)).log()).sum(1).neg().mean();
+        return ce;
+    });
+}
+
+const AUX_LOSS_WEIGHT = 0.4; // tune 0.3–0.5
+function combinedRaceLoss(weight = AUX_LOSS_WEIGHT) {
+    return (yTrue, yPred) => tf.tidy(() => {
+        const b = bceLoss(yTrue, yPred);
+        const a = topKSoftAuxLoss(yTrue, yPred, 3, 0.1);
+        return b.mul(tf.scalar(1 - weight)).add(a.mul(tf.scalar(weight)));
+    });
+}
+
 
 // ─── MODEL PERSISTENCE ────────────────────────────────────────────────────────
 
@@ -463,7 +516,7 @@ function buildModel(maxRunners, timeSteps, histFeatures, staticFeatures) {
     }).apply(h);
 
     h = tf.layers.timeDistributed({
-        layer: tf.layers.dropout({ rate: 0.3 }),
+        layer: tf.layers.dropout({ rate: 0.2 }),
         name: 'hist_dropout',
     }).apply(h);
 
@@ -490,7 +543,7 @@ function buildModel(maxRunners, timeSteps, histFeatures, staticFeatures) {
     }).apply(s);
 
     s = tf.layers.timeDistributed({
-        layer: tf.layers.dropout({ rate: 0.3 }),
+        layer: tf.layers.dropout({ rate: 0.2 }),
         name: 'static_dropout',
     }).apply(s);
 
@@ -519,7 +572,7 @@ function buildModel(maxRunners, timeSteps, histFeatures, staticFeatures) {
     const preAttn = tf.layers.layerNormalization({ name: 'pre_attention_ln' }).apply(combined);
 
     const attended = new MultiHeadAttention({
-        numHeads: 4,
+        numHeads: 8,
         embedDim:   64, // match combined's last-dim (64) so downstream projection works
         dropout:  0.1,
     }).apply(preAttn);
@@ -531,7 +584,26 @@ function buildModel(maxRunners, timeSteps, histFeatures, staticFeatures) {
         layer: tf.layers.dense({ units: 64, activation: 'linear' }),
         name: 'attention_fuse_proj',
     }).apply(fused);
-    const normed   = tf.layers.layerNormalization({ name: 'attention_ln' }).apply(fusedProj);
+    let normed   = tf.layers.layerNormalization({ name: 'attention_ln' }).apply(fusedProj);
+
+    // Feed-Forward block (FFN) with residual + LayerNorm
+    let ffn = tf.layers.timeDistributed({
+        layer: tf.layers.dense({ units: 128, activation: 'relu' }),
+        name: 'ffn_dense1',
+    }).apply(normed);
+
+    ffn = tf.layers.timeDistributed({
+        layer: tf.layers.dropout({ rate: 0.2 }),
+        name: 'ffn_dropout',
+    }).apply(ffn);
+
+    ffn = tf.layers.timeDistributed({
+        layer: tf.layers.dense({ units: 64, activation: 'linear' }),
+        name: 'ffn_dense2',
+    }).apply(ffn);
+
+    const resid = tf.layers.add({ name: 'ffn_residual_add' }).apply([normed, ffn]);
+    normed = tf.layers.layerNormalization({ name: 'post_ffn_ln' }).apply(resid);
 
     // ── Output head ───────────────────────────────────────────────────────────
 
@@ -558,7 +630,7 @@ function buildModel(maxRunners, timeSteps, histFeatures, staticFeatures) {
     const optimizer = tf.train.adam(0.0003);
     model.compile({
         optimizer,
-        loss:      'binaryCrossentropy',
+        loss:      combinedRaceLoss(AUX_LOSS_WEIGHT),
         metrics:   ['accuracy', recallAtThree, precisionAtThree],
     });
     return model;

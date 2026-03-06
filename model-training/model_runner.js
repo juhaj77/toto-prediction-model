@@ -466,9 +466,9 @@ function loadData(filePath, isTraining = true) {
 
 // ─── MODEL ARCHITECTURE ───────────────────────────────────────────────────────
 //
-// History branch:  Masking → LSTM(64) → LSTM(32) → BN → Dropout(0.3)
-// Static branch:   Dense(48) → BN → Dense(32) → Dropout(0.3)
-// Combined head:   Dense(48) → BN → Dropout(0.25) → Dense(24) → Dense(1, sigmoid)
+// History branch:  Masking → LSTM(64) → LSTM(32) → BN → Dropout(0.2)
+// Static branch:   Dense(48,L2) → BN → Dense(32,L2) → Dropout(0.2)
+// Combined head:   Dense(48,L2) → BN → Dropout(0.25) → Dense(24) → Dense(1, sigmoid)
 
 function buildModel(timeSteps, histFeatures, staticFeatures) {
     const histInput   = tf.input({ shape: [timeSteps, histFeatures], name: 'history_input' });
@@ -481,18 +481,20 @@ function buildModel(timeSteps, histFeatures, staticFeatures) {
     h = tf.layers.lstm({ units: 32, returnSequences: false, recurrentDropout: 0.1,
         kernelRegularizer: tf.regularizers.l2({ l2: 0.0005 }) }).apply(h);
     h = tf.layers.batchNormalization().apply(h);
-    h = tf.layers.dropout({ rate: 0.3 }).apply(h);
+    h = tf.layers.dropout({ rate: 0.2 }).apply(h);
 
     // Static branch
     let s = tf.layers.dense({ units: 48, activation: 'relu',
         kernelRegularizer: tf.regularizers.l2({ l2: 0.0005 }) }).apply(staticInput);
     s = tf.layers.batchNormalization().apply(s);
-    s = tf.layers.dense({ units: 32, activation: 'relu' }).apply(s);
-    s = tf.layers.dropout({ rate: 0.3 }).apply(s);
+    s = tf.layers.dense({ units: 32, activation: 'relu',
+        kernelRegularizer: tf.regularizers.l2({ l2: 0.0005 }) }).apply(s);
+    s = tf.layers.dropout({ rate: 0.2 }).apply(s);
 
     // Combined head
     let out = tf.layers.concatenate().apply([h, s]);
-    out = tf.layers.dense({ units: 48, activation: 'relu' }).apply(out);
+    out = tf.layers.dense({ units: 48, activation: 'relu',
+        kernelRegularizer: tf.regularizers.l2({ l2: 0.0005 }) }).apply(out);
     out = tf.layers.batchNormalization().apply(out);
     out = tf.layers.dropout({ rate: 0.25 }).apply(out);
     out = tf.layers.dense({ units: 24, activation: 'relu' }).apply(out);
