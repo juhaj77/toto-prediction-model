@@ -21,7 +21,7 @@
 
 'use strict';
 
-const tf = require('@tensorflow/tfjs');
+const tf = require('@tensorflow/tfjs-node-gpu');
 const { MultiHeadAttention } = require('./MultiHeadAttention.js')
 const fs = require('fs');
 
@@ -828,7 +828,7 @@ async function runTraining() {
 
     await model.fit([histTrain, statTrain, maskTrain], yTrain, {
         epochs:          50,
-        batchSize:       32,   // smaller batch due to 4D tensors
+        batchSize:       512,   // smaller batch due to 4D tensors
         shuffle:         true,
         validationData:  [[histVal, statVal, maskVal], yVal],
         // sampleWeight is not supported in tfjs-layers; padding is handled via mask_input gating.

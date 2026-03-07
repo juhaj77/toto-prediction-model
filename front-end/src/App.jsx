@@ -30,9 +30,106 @@ const MODEL_VARIANTS = {
         extractScores: (scores, metadata) =>
             metadata.map(m => ({ ...m, prob: scores[m.slot] })),
     },
+    mixed: {
+        id:           'mixed',
+        label:        'Mixed (Runner + Race)',
+        description:  'Runner encoder + Race attention  ·  tensor: [1, 18, 8, 25] + mask',
+        modelPath:    '/model-mixed/model.json',
+        mappingsPath: '/mappings_mixed.json',
+        buildFeatures: buildRaceBasedFeatures,
+        extractScores: (scores, metadata) =>
+            metadata.map(m => ({ ...m, prob: scores[m.slot] })),
+    },
 };
 
+// ── Helper: Build simple pseudocode summary for a model variant ─────────────
+function buildModelPseudocode(variantId, info) {
+    const mono = {
+        fontFamily: "'IBM Plex Mono','Courier New',monospace",
+        whiteSpace: 'pre',
+        color: '#76eaa3',
+        fontSize: 11,
+        lineHeight: 1.35,
+    };
+    const box = {
+        position: 'absolute',
+        top: '100%',
+        left: 22,
+        marginTop: 8,
+        background: '#0d0f14',
+        border: '1px solid #1e2330',
+        boxShadow: '0 6px 24px rgba(0,0,0,0.35)',
+        borderRadius: 6,
+        padding: '10px 12px',
+        color: '#e8eaf0',
+        zIndex: 20,
+        minWidth: 300,
+        maxWidth: 520,
+    };
+
+    const dims = (k, d) => (info && info[k] != null ? info[k] : d);
+
+    let lines = [];
+    if (variantId === 'mixed') {
+        const attnHeads = dims('attnHeads', 12);
+        const embedDim  = dims('embedDim', 96);
+        const ffnDim    = dims('ffnDim', 192);
+        const rL2       = dims('runnerLstm2Units', 48);
+        const rProj     = dims('runnerProjDim', 48);
+        const outUnits  = dims('outUnits', 24);
+        lines = [
+            'MixedRunnerRace(inputs: history[R,T,HF], static[R,SF], mask[R,1]) {',
+            `  // Runner history encoder (per runner)`,
+            `  h = TD(Masking(-1) → LSTM(64, seq) → LSTM(${rL2}) → Dense(${rProj}, relu) → Dropout(0.1))`,
+            `  s = TD(Dense(48, relu) → BN/LN → Dense(32, relu) → Dropout(0.2))`,
+            `  x = TD(Dense(${embedDim}, relu) → BN/LN)(Concat(h, s))`,
+            `  // Self-attention over runners`,
+            `  a = MHA(heads=${attnHeads}, dim=${embedDim})(LN(x))`,
+            `  y = LN(TD(Dense(${embedDim}, linear))(Concat(x, a)))`,
+            `  y = LN(Add(y, TD(Dense(${ffnDim}, relu) → Dropout → Dense(${embedDim}, linear))(y)))`,
+            `  // Per runner output`,
+            `  z = TD(Dropout(0.25) → Dense(${outUnits}, relu) → Dense(1, sigmoid))`,
+            `  return z ⊙ mask`,
+            '}',
+            '',
+            '// Loss: BCE + aux SoftTopK(K=3, w≈0.5) | Selection: val_ndcg@3',
+        ];
+    } else if (variantId === 'race') {
+        const attnHeads = dims('attnHeads', 8);
+        const embedDim  = dims('embedDim', 64);
+        const ffnDim    = dims('ffnDim', 128);
+        lines = [
+            'RaceModel(inputs: history[R,T,HF], static[R,SF], mask[R,1]) {',
+            '  x = TD(LSTM(64, seq) → LSTM(32) → Dense(32, relu))',
+            `  x = TD(Dense(${embedDim}, relu) → BN/LN)(Concat(x, TD(Dense(32, relu))(static)))`,
+            `  a = MHA(heads=${attnHeads}, dim=${embedDim})(LN(x))`,
+            `  y = LN(TD(Dense(${embedDim}, linear))(Concat(x, a)))`,
+            `  y = LN(Add(y, TD(Dense(${ffnDim}, relu) → Dropout → Dense(${embedDim}, linear))(y)))`,
+            '  z = TD(Dense(1, sigmoid))',
+            '  return z ⊙ mask',
+            '}',
+            '',
+            '// Loss: BCE (+ optional SoftTopK) | Selection: val_ndcg@3',
+        ];
+    } else if (variantId === 'runner') {
+        lines = [
+            'RunnerModel(inputs: runnerHistory[T,HF], runnerStatic[SF]) {',
+            '  h = LSTM(64, seq) → LSTM(32) → Dense(32, relu) → Dropout',
+            '  s = Dense(48, relu) → BN/LN → Dense(32, relu) → Dropout',
+            '  x = Dense(64, relu)(Concat(h, s))',
+            '  y = Dense(24, relu) → Dense(1, sigmoid)',
+            '  return y',
+            '}',
+            '',
+            '// Loss: BCE | Metrics: AUC/AP',
+        ];
+    }
+
+    return { box, mono, text: lines.join('\n') };
+}
+
 export default function App() {
+    const [hoveredVariant, setHoveredVariant] = React.useState(null);
     const [tfReady, setTfReady] = useState(false);
     const [cards,          setCards]          = useState([]);
     const [races,          setRaces]          = useState([]);
@@ -55,6 +152,7 @@ export default function App() {
     const [models, setModels] = useState({
         runner: { model: null, maps: null, info: null, status: 'idle' },
         race:   { model: null, maps: null, info: null, status: 'idle' },
+        mixed:  { model: null, maps: null, info: null, status: 'idle' },
     });
 
     useEffect(() => {
@@ -257,15 +355,28 @@ export default function App() {
                 const histT   = tf.tensor3d(X_hist);
                 const staticT = tf.tensor2d(X_static);
                 const pred    = modelState.model.predict([histT, staticT]);
-                scores        = await pred.data();
+                scores        = Array.from(await pred.data());
                 histT.dispose(); staticT.dispose(); pred.dispose();
             } else {
                 const histT   = tf.tensor4d(X_hist);
                 const staticT = tf.tensor3d(X_static);
                 const maskT   = tf.tensor3d(X_mask);
                 const pred    = modelState.model.predict([histT, staticT, maskT]);
-                scores        = await pred.data();
+                scores        = Array.from(await pred.data());
                 histT.dispose(); staticT.dispose(); maskT.dispose(); pred.dispose();
+            }
+
+            // Optional temperature calibration (mixed and race models)
+            const info = modelState.info || {};
+            if ((activeVariant === 'mixed' || activeVariant === 'race') && info.calibration && info.calibration.type === 'temperature' && typeof info.calibration.T === 'number') {
+                const T = info.calibration.T;
+                const eps = 1e-7;
+                for (let i=0;i<scores.length;i++){
+                    const p = Math.min(1-eps, Math.max(eps, scores[i]));
+                    const logit = Math.log(p/(1-p));
+                    const pCal = 1/(1+Math.exp(-(logit/Math.max(0.2, Math.min(5.0, T)))));
+                    scores[i] = pCal;
+                }
             }
 
             setPredictions(
@@ -295,9 +406,9 @@ export default function App() {
                 {/* ── Header ── */}
                 <div style={{ marginBottom: 28, borderBottom: '1px solid #1e2330', paddingBottom: 20 }}>
                     <div style={{ display: 'flex', flexDirection:'row', justifyContent: 'space-between' }}>
-                    <div style={{ fontSize: 11, letterSpacing: 4, color: '#4a90d9', textTransform: 'uppercase', marginBottom: 6 }}>
-                        Toto Prediction System
-                    </div>
+                        <div style={{ fontSize: 11, letterSpacing: 4, color: '#4a90d9', textTransform: 'uppercase', marginBottom: 6 }}>
+                            Toto Prediction System
+                        </div>
                         <a href="https://github.com/juhaj77/toto-prediction-model"
                            target="_blank" rel="noopener noreferrer"
                            style={{
@@ -324,8 +435,18 @@ export default function App() {
                             const vState   = models[v.id];
                             const isActive = activeVariant === v.id;
                             return (
-                                <label key={v.id} style={{ display: 'flex', alignItems: 'flex-start', gap: 8,
-                                    cursor: 'pointer', opacity: isActive ? 1 : 0.5, transition: 'opacity 0.2s' }}>
+                                <label
+                                    key={v.id}
+                                    tabIndex={0}
+                                    onMouseEnter={() => setHoveredVariant(v.id)}
+                                    onMouseLeave={() => setHoveredVariant(null)}
+                                    onFocus={() => setHoveredVariant(v.id)}
+                                    onBlur={() => setHoveredVariant(null)}
+                                    style={{
+                                        display: 'flex', alignItems: 'flex-start', gap: 8,
+                                        cursor: 'pointer', opacity: isActive ? 1 : 0.5, transition: 'opacity 0.2s',
+                                        position: 'relative'
+                                    }}>
                                     <input type="checkbox" checked={isActive}
                                            onChange={() => handleVariantChange(v.id)}
                                            style={{ marginTop: 2, accentColor: '#4a90d9' }} />
@@ -338,6 +459,17 @@ export default function App() {
                                         <div style={{ fontSize: 10, color: '#6a6a9e', letterSpacing: 0.3, marginTop: 1 }}>
                                             {v.description}
                                         </div>
+                                        {hoveredVariant === v.id && (() => {
+                                            const pcs = buildModelPseudocode(v.id, vState.info);
+                                            return (
+                                                <div style={pcs.box} role="tooltip" aria-label={`${v.label} model pseudocode`}>
+                                                    <div style={{ color: '#4a90d9', fontSize: 10, letterSpacing: 1, marginBottom: 6, textTransform: 'uppercase' }}>
+                                                        Model summary
+                                                    </div>
+                                                    <div style={pcs.mono}>{pcs.text}</div>
+                                                </div>
+                                            );
+                                        })()}
                                     </div>
                                 </label>
                             );
@@ -358,7 +490,7 @@ export default function App() {
                             return (
                                 <span style={{ color: '#556', fontSize: 11, display: 'flex', gap: 14, flexWrap: 'wrap' }}>
                                     <span>Epoch <b style={{ color: '#aaa' }}>{info.epoch}</b></span>
-                                    <span>val_loss <b style={{ color: '#aaa' }}>{info.val_loss}</b></span>
+                                    <span>val_loss <b style={{ color: '#aaa' }}>{info.val_loss != null ? Number(info.val_loss).toFixed(4) : '—'}</b></span>
                                     <span>val_acc <b style={{ color: '#aaa' }}>{info.val_acc != null ? (info.val_acc * 100).toFixed(1) + '%' : '—'}</b></span>
                                     <span>val_auc <b style={{ color: '#aaa' }}>{info.val_auc != null ? (info.val_auc * 100).toFixed(1) + '%' : '—'}</b></span>
                                     <span style={{ borderLeft: '1px solid #222', paddingLeft: 14 }}>

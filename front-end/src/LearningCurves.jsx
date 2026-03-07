@@ -1,8 +1,8 @@
 // ─── LearningCurves.jsx ──────────────────────────────────────────────────────
-// Collapsible learning curve chart for race-based and runner-based models.
+// Collapsible learning curve chart for race-based, runner-based, and mixed models.
 // Props:
 //   info      — trainingInfo object from model_full.json
-//   variant   — 'race' | 'runner'
+//   variant   — 'race' | 'runner' | 'mixed'
 // ─────────────────────────────────────────────────────────────────────────────
 
 import React, { useState, useMemo } from 'react';
@@ -36,6 +36,21 @@ const RUNNER_METRICS = [
     { key: 'val_ndcg3',label: 'val NDCG@3',   color: '#ffd166', dash: '' },
     { key: 'val_hit1', label: 'val Hit@1',    color: '#06d6a0', dash: '5 3' },
     { key: 'val_p05',  label: 'val prec@0.5', color: '#2ecc71', dash: '3 2' },
+];
+
+// Mixed model uses the same metrics as race-based (same output structure)
+// but with slightly different colour accent to distinguish visually
+const MIXED_METRICS = [
+    { key: 'loss',     label: 'loss (train)',     color: '#e74c3c', dash: '4 2' },
+    { key: 'val_loss', label: 'val loss',         color: '#ff8c69', dash: '' },
+    { key: 'val_logloss_race', label: 'val logloss (per-race)', color: '#ffb199', dash: '2 2' },
+    { key: 'val_acc',  label: 'val acc',          color: '#4a90d9', dash: '' },
+    { key: 'val_auc',  label: 'val AUC (ROC)',    color: '#f0a500', dash: '' },
+    { key: 'val_r3',   label: 'val recall@3',     color: '#2ecc71', dash: '' },
+    { key: 'val_p3',   label: 'val prec@3',       color: '#a8e063', dash: '3 2' },
+    { key: 'val_ndcg3',label: 'val NDCG@3',       color: '#ffd166', dash: '' },
+    { key: 'val_hit1', label: 'val Hit@1',        color: '#06d6a0', dash: '5 3' },
+    { key: 'val_ap_macro', label: 'val AP (macro per-race)', color: '#c084fc', dash: '' },
 ];
 
 // ── Custom tooltip ────────────────────────────────────────────────────────────
@@ -126,7 +141,11 @@ export default function LearningCurves({ info, variant }) {
     const [open, setOpen] = useState(false);
     const [hidden, setHidden] = useState(new Set());
 
-    const metrics = variant === 'runner' ? RUNNER_METRICS : RACE_METRICS;
+    const metrics = variant === 'runner'
+        ? RUNNER_METRICS
+        : variant === 'mixed'
+            ? MIXED_METRICS
+            : RACE_METRICS;
 
     const history = useMemo(() => {
         if (!info?.history?.length) return [];
@@ -170,6 +189,9 @@ export default function LearningCurves({ info, variant }) {
 
     const hasData = history.length > 0;
 
+    // Accent colour per variant for the toggle button
+    const accentColor = variant === 'mixed' ? '#c084fc' : '#4a90d9';
+
     return (
         <div style={{ marginBottom: 20 }}>
             {/* Toggle button */}
@@ -186,9 +208,12 @@ export default function LearningCurves({ info, variant }) {
                     fontFamily: "'IBM Plex Mono','Courier New',monospace",
                     fontSize: 11,
                     letterSpacing: 2,
-                    color: hasData ? '#4a90d9' : '#333',
+                    color: hasData ? accentColor : '#333',
                     textTransform: 'uppercase',
                     opacity: hasData ? 1 : 0.4,
+                    outline: 'none',
+                    userSelect: 'none',
+                    webkitUserSelect: 'none',
                 }}
                 disabled={!hasData}
             >
@@ -225,7 +250,7 @@ export default function LearningCurves({ info, variant }) {
                 <div style={{
                     marginTop: 12,
                     background: '#080b10',
-                    border: '1px solid #1a1d26',
+                    border: `1px solid ${variant === 'mixed' ? '#2a1a3a' : '#1a1d26'}`,
                     borderRadius: 6,
                     padding: '16px 12px 12px',
                 }}>
