@@ -637,7 +637,7 @@ export default function App() {
                                                 ? <span style={{ fontSize: 26, lineHeight: 1 }}>{['①','②','③'][i]}</span>
                                                 : `#${i + 1}`}
                                         </td>
-                                        <td style={{ padding: '10px 12px', color: '#666' }}>{p.number}</td>
+                                        <td style={{ padding: '10px 12px', color: '#666', fontWeight: 'bold', fontSize: '1.1em' }}>{p.number}</td>
                                         <td style={{ padding: '10px 12px', fontWeight: 600 }}>{p.name}</td>
                                         <td style={{ padding: '10px 12px', color: '#aaa' }}>{p.driver || '—'}</td>
                                         <td style={{ padding: '10px 12px' }}>
