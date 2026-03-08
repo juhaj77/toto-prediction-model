@@ -459,7 +459,7 @@ export default function App() {
                                         <div style={{ fontSize: 10, color: '#6a6a9e', letterSpacing: 0.3, marginTop: 1 }}>
                                             {v.description}
                                         </div>
-                                        {hoveredVariant === v.id && (() => {
+                                        { /*hoveredVariant === v.id && (() => {
                                             const pcs = buildModelPseudocode(v.id, vState.info);
                                             return (
                                                 <div style={pcs.box} role="tooltip" aria-label={`${v.label} model pseudocode`}>
@@ -469,7 +469,7 @@ export default function App() {
                                                     <div style={pcs.mono}>{pcs.text}</div>
                                                 </div>
                                             );
-                                        })()}
+                                        })()*/}
                                     </div>
                                 </label>
                             );
