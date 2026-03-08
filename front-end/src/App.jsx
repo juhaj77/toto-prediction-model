@@ -491,8 +491,8 @@ export default function App() {
                                 <span style={{ color: '#556', fontSize: 11, display: 'flex', gap: 14, flexWrap: 'wrap' }}>
                                     <span>Epoch <b style={{ color: '#aaa' }}>{info.epoch}</b></span>
                                     <span>val_ndcg3 <b style={{ color: '#aaa' }}>{info.val_ndcg3 != null ? Number(info.val_ndcg3 * 100).toFixed(1) + '%' : '—'}</b></span>
-                                    <span>val_acc <b style={{ color: '#aaa' }}>{info.val_acc != null ? (info.val_acc * 100).toFixed(1) + '%' : '—'}</b></span>
-                                    <span>val_auc <b style={{ color: '#aaa' }}>{info.val_auc != null ? (info.val_auc * 100).toFixed(1) + '%' : '—'}</b></span>
+                                    <span>val_hit1 <b style={{ color: '#aaa' }}>{info.val_hit1 != null ? (info.val_hit1 * 100).toFixed(1) + '%' : '—'}</b></span>
+                                    <span>val_auc <b style={{ color: '#e87979' }}>{info.val_auc != null ? (info.val_auc * 100).toFixed(1) + '%' : '—'}</b></span>
                                     <span style={{ borderLeft: '1px solid #222', paddingLeft: 14 }}>
                                         Data <b style={{ color: '#aaa' }}>{info.dataStartDate} → {info.dataEndDate}</b>
                                     </span>
