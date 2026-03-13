@@ -1,0 +1,6 @@
+{
+  "type": "temperature",
+  "T": 0.95,
+  "fittedOn": "training_all_valid_masked",
+  "loss": 0.502134
+}

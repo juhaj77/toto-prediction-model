@@ -36,11 +36,6 @@
 
 'use strict';
 
-let __running = false; // simple in-process concurrency guard
-
-const tf = require('@tensorflow/tfjs-node-gpu');
-const fs = require('fs');
-const { MultiHeadAttention } = require('./MultiHeadAttention.js');
 
 // Paths and constants (distinct for mixed model)
 const TRAINING_DATA = './training_data.json';
@@ -50,15 +45,66 @@ const MODEL_MAIN    = 'model.json';
 const MAX_HISTORY   = 8;    // expected history steps in data (can be inferred from loadData when needed)
 const MAX_RUNNERS   = 18;   // padding up to max field size
 
+let __running = false; // simple in-process concurrency guard
+//runId:exp-lr1e-3-ln
+// Dynamic TFJS backend selector: tfjs-node (CPU) vs tfjs-node-gpu (CUDA)
+let TFJS_BACKEND_LABEL = 'tfjs-node-gpu';
+let tf;
+(function selectTfBackend(){
+  // Read preference from env or CLI args
+  const envPref = (process.env.TFJS_BACKEND || '').toLowerCase();
+  // Parse process.argv here (module scope) so it works both CLI and programmatic
+  let argPref = '';
+  for (const a of process.argv || []){
+    // support --backend=cpu|gpu and --tfjs=cpu|gpu|tfjs-node|tfjs-node-gpu
+    const m = a.match(/^--(?:backend|tfjs)=([^=]+)$/i);
+    if (m) { argPref = String(m[1]).toLowerCase(); break; }
+  }
+  const pref = (argPref || envPref).trim();
+  const wantsGPU = ['gpu','tfjs-node-gpu','cuda','nvidia','device:gpu'].includes(pref);
+  const wantsCPU = ['cpu','tfjs-node','node','device:cpu'].includes(pref);
+
+  function tryReq(name){ try { return require(name); } catch(e){ return null; } }
+
+  if (wantsCPU){
+    tf = tryReq('@tensorflow/tfjs-node');
+    if (!tf){ tf = tryReq('@tensorflow/tfjs-node-gpu'); TFJS_BACKEND_LABEL = tf ? 'tfjs-node-gpu' : 'missing'; }
+    else { TFJS_BACKEND_LABEL = 'tfjs-node'; }
+  } else {
+    // default prefer GPU, fallback to CPU
+    tf = tryReq('@tensorflow/tfjs-node-gpu');
+    if (!tf){ tf = tryReq('@tensorflow/tfjs-node'); TFJS_BACKEND_LABEL = tf ? 'tfjs-node' : 'missing'; }
+    else { TFJS_BACKEND_LABEL = 'tfjs-node-gpu'; }
+  }
+
+  if (!tf){
+    throw new Error('Unable to load TensorFlow.js backend. Please install @tensorflow/tfjs-node or @tensorflow/tfjs-node-gpu.');
+  }
+})();
+
+const fs = require('fs');
+const { MultiHeadAttention } = require('./MultiHeadAttention.js');
+
+
+
 // ─── LOSSES & METRICS (minimal subset reused locally) ──────────────────────────
 
+// Global knobs (mutable during training callbacks) for dynamic loss behavior
+let __auxWeight = 0.3;
+let __labelSmoothing = 0.0;
+function setAuxWeight(w){ __auxWeight = Math.max(0, Math.min(1, Number(w)||0)); }
+function setLabelSmoothing(s){ __labelSmoothing = Math.max(0, Math.min(0.2, Number(s)||0)); }
+
 // Binary cross-entropy, numerically stable
-function bceLoss(yTrue, yPred) {
+function bceLoss(yTrue, yPred, labelSmoothing = 0) {
   return tf.tidy(() => {
     const one = tf.scalar(1);
     const p = yPred.clipByValue(1e-7, 1 - 1e-7);
-    const term1 = yTrue.mul(p.log());
-    const term2 = one.sub(yTrue).mul(one.sub(p).log());
+    // Label smoothing: y' = y*(1-s) + 0.5*s
+    const s = Math.max(0, Math.min(0.2, Number(labelSmoothing) || 0));
+    const ySm = s > 0 ? yTrue.mul(1 - s).add(tf.scalar(0.5 * s)) : yTrue;
+    const term1 = ySm.mul(p.log());
+    const term2 = one.sub(ySm).mul(one.sub(p).log());
     return term1.add(term2).neg().mean();
   });
 }
@@ -88,13 +134,23 @@ function topKSoftAuxLoss(yTrue, yPred, K = 3, smooth = 0.1) {
   });
 }
 
-// Combined race loss: BCE + auxWeight * soft Top‑K
-function combinedRaceLoss(auxWeight = 0.3) {
+// Combined race loss (static params)
+function combinedRaceLoss(auxWeight = 0.3, labelSmoothing = 0) {
   return (yTrue, yPred) => tf.tidy(() => {
-    const bce = bceLoss(yTrue, yPred);
+    const bce = bceLoss(yTrue, yPred, labelSmoothing);
     if (!auxWeight || auxWeight <= 0) return bce;
     const aux = topKSoftAuxLoss(yTrue, yPred, 3, 0.1);
     return bce.add(aux.mul(tf.scalar(auxWeight)));
+  });
+}
+
+// Dynamic combined loss that reads mutable globals for annealing
+function dynamicCombinedRaceLoss() {
+  return (yTrue, yPred) => tf.tidy(() => {
+    const bce = bceLoss(yTrue, yPred, __labelSmoothing);
+    if (!__auxWeight || __auxWeight <= 0) return bce;
+    const aux = topKSoftAuxLoss(yTrue, yPred, 3, 0.1);
+    return bce.add(aux.mul(tf.scalar(__auxWeight)));
   });
 }
 
@@ -332,7 +388,7 @@ function loadData(filePath = TRAINING_DATA){
     for (let slot=0; slot<MAX_RUNNERS; slot++){
       const runner = starters[slot];
       if(!runner){
-        raceStatic.push(new Array(25).fill(0));
+        raceStatic.push(new Array(28).fill(0));
         raceHist.push(Array.from({length: MAX_HISTORY}, ()=> new Array(25).fill(-1)));
         raceY.push([0]); raceMask.push([0]);
         continue;
@@ -367,16 +423,19 @@ function loadData(filePath = TRAINING_DATA){
 
       // Static vector — align with model_race.js (25 dims, no trackId)
       const breed = race.isColdBlood ? 'SH' : 'LV';
-      const record = (runner.record && runner.record>0) ? runner.record : means[breed].record;
+      const record = (runner.record && runner.record>0) ? runner.record : 0;
       const startNum = Math.max(1, Number(runner.number || runner.startNumber || runner.draw || 1));
       const genderVal = (runner.gender != null) ? Number(runner.gender) : 2; // 1=mare 2=gelding 3=stallion (mapped earlier in pipeline)
       const staticVec = [
         (startNum) / 20,                              // [0]  start number normalized
         coachId/6000.0,                               // [1]  coach ID
+        record ? 1 : 0,
         (record || 0) / 50,                           // [2]  record (imputed if missing)
         driverId/5000.0,                              // [3]  driver ID
-        (Number(runner.age || 5)) / 15,               // [4]  age
+        runner.age ? 1 : 0,
+        (Number(runner.age || 0)) / 15,               // [4]  age
         (genderVal) / 3,                              // [5]  gender code 1..3
+        (race.isColdBlood ? 1 : 0),
         (race.isColdBlood ? 1 : 0),                   // [6]  breed (cold blood flag)
         frontActive, frontKnown,                      // [7-8]
         rearActive,  rearKnown,                       // [9-10]
@@ -405,9 +464,9 @@ function loadData(filePath = TRAINING_DATA){
         const startDate = parseDate(ps.date);
         const daysSince = (raceDate && startDate) ? Math.min(365, (raceDate - startDate) / 86400000) : 30;
 
-        const kmNorm  = normaliseKmTime(ps.kmTime, ps.distance);
-        const kmKnown = kmNorm > 0 ? 1 : 0;
-        const kmFinal = kmKnown ? kmNorm / 100 : (means[breed].km / 100);
+        //const kmNorm  = normaliseKmTime(ps.kmTime, ps.distance);
+        const kmKnown = ps.kmTime > 0 ? 1 : 0;
+        //const kmFinal = kmKnown ? kmNorm / 100 : (means[breed].km / 100);
 
         const distKnown  = (ps.distance || 0) > 0 ? 1 : 0;
         const distFinal  = distKnown ? (ps.distance / 3100) : 0.67;
@@ -429,7 +488,7 @@ function loadData(filePath = TRAINING_DATA){
         const pscart  = (ps.specialCart || '').toUpperCase();
 
         hist.push([
-          kmFinal,    kmKnown,                                           // [0-1]
+          ps.kmTime / 100,    kmKnown,                                           // [0-1]
           distFinal,  distKnown,                                         // [2-3]
           daysSince / 365,                                               // [4]
           posFinal,   posKnown,                                          // [5-6]
@@ -482,7 +541,7 @@ function loadData(filePath = TRAINING_DATA){
     mask:               tf.tensor3d(X_mask),
     y:                  tf.tensor3d(Y),
     histFeatureCount:   25,
-    staticFeatureCount: 25,
+    staticFeatureCount: 28,
     dataMeta,
     raceDates,
   };
@@ -523,6 +582,7 @@ async function saveModel(model, meta = {}, fileName = MODEL_MAIN, folder = MODEL
         calibration:   meta.calibration   ?? null,
         metrics_at_selection: meta.metrics_at_selection ?? null,
         history:       meta.history       ?? null,
+        tfjs_backend:  meta.tfjs_backend  ?? TFJS_BACKEND_LABEL,
       },
     };
     fs.writeFileSync(`${outDir}/${fileName}`, JSON.stringify(payload));
@@ -556,12 +616,34 @@ function buildMixedModel(maxRunners, timeSteps, histFeatures, staticFeatures, op
     auxLossWeight: 0.3,
     learningRate: 3e-4,
     l2: 5e-4,
-    useLayerNormInStatic: false,
-    swapBNtoLN: false,
+    useLayerNormInStatic: true,
+    swapBNtoLN: true,
     runnerLstm2Units: 32, // set 64 to try 64→64
+    preEncodeHistory: null, // { units: 16, useLayerNorm: true }
     compile: true,
     useListNet: false,
+    autoFixHeads: true,
   }, options);
+
+  // Guard: ensure embedDim divisible by attnHeads (required by MultiHeadAttention)
+  if (opt.embedDim % opt.attnHeads !== 0) {
+    if (opt.autoFixHeads) {
+      const fixed = Math.max(opt.attnHeads, Math.floor(opt.embedDim / opt.attnHeads) * opt.attnHeads);
+      const oldEmbed = opt.embedDim;
+      if (fixed > 0 && fixed !== oldEmbed) {
+        console.warn(`MixedModel: embedDim (${oldEmbed}) not divisible by attnHeads (${opt.attnHeads}). Adjusting embedDim → ${fixed}.`);
+        opt.embedDim = fixed;
+      } else {
+        // fallback: adjust heads to a divisor of embedDim (prefer 16, 12, 8, 6, 4, 2)
+        const prefer = [16, 12, 8, 6, 4, 2];
+        const newHeads = prefer.find(h => opt.embedDim % h === 0) || 1;
+        console.warn(`MixedModel: cannot adjust embedDim safely. Adjusting attnHeads ${opt.attnHeads} → ${newHeads}.`);
+        opt.attnHeads = newHeads;
+      }
+    } else {
+      throw new Error(`MixedModel config error: embedDim (${opt.embedDim}) must be divisible by attnHeads (${opt.attnHeads}).`);
+    }
+  }
 
   const l2reg = tf.regularizers.l2({ l2: opt.l2 });
 
@@ -572,6 +654,17 @@ function buildMixedModel(maxRunners, timeSteps, histFeatures, staticFeatures, op
   // ── Runner sequence encoder (per runner via TimeDistributed) ────────────────
   let h = tf.layers.timeDistributed({ layer: tf.layers.masking({ maskValue: -1 }), name: 'hist_masking' })
     .apply(histInput);
+
+  // Optional pre-encoder to rescale raw history features
+  if (opt.preEncodeHistory && opt.preEncodeHistory.units) {
+    h = tf.layers.timeDistributed({
+      layer: tf.layers.dense({ units: opt.preEncodeHistory.units, activation: 'relu', kernelRegularizer: l2reg }),
+      name: 'hist_preenc_dense',
+    }).apply(h);
+    if (opt.preEncodeHistory.useLayerNorm) {
+      h = tf.layers.timeDistributed({ layer: tf.layers.layerNormalization(), name: 'hist_preenc_ln' }).apply(h);
+    }
+  }
 
   h = tf.layers.timeDistributed({
     layer: tf.layers.lstm({ units: 64, returnSequences: true, recurrentDropout: 0.2,
@@ -650,7 +743,7 @@ function buildMixedModel(maxRunners, timeSteps, histFeatures, staticFeatures, op
 
   if (opt.compile) {
     const optimizer = tf.train.adam(opt.learningRate);
-    const lossFn = opt.useListNet ? (yTrue, yPred)=> topKSoftAuxLoss(yTrue, yPred, 3, 0.1) : combinedRaceLoss(opt.auxLossWeight);
+    const lossFn = opt.useListNet ? (yTrue, yPred)=> topKSoftAuxLoss(yTrue, yPred, 3, 0.1) : dynamicCombinedRaceLoss();
     model.compile({
       optimizer,
       loss:      lossFn,
@@ -682,11 +775,11 @@ async function runTraining(opts = {}){
     temporalSplit: true,
     seed: 42,
     epochs: 90,                 // pidennetty treeni
-    batchSize: 384,
-    learningRate: 3e-4,        // Adam (L2 toimii weight decayna)
-    minLearningRate: 3e-5,
+    batchSize: 512,
+    learningRate: 1e-3,        // Adam (L2 toimii weight decayna)
+    minLearningRate: 1e-4,
     scheduler: 'cosine',       // warmup + cosine
-    warmupEpochs: 4,
+    warmupEpochs: 6,
     earlyStopPatience: 12,
     plateauPatience: 5,
     plateauFactor: 0.5,
@@ -710,6 +803,10 @@ async function runTraining(opts = {}){
   const data = loadData(options.trainingFile);
   const { hist, static: stat, mask, y, raceDates } = data;
 
+  // Initialize dynamic loss knobs
+  setAuxWeight(options.auxLossWeight != null ? options.auxLossWeight : 0.3);
+  setLabelSmoothing(options.labelSmoothing != null ? options.labelSmoothing : 0.0);
+
   const maxRunners = hist.shape[1];
   const timeSteps  = hist.shape[2];
   const histFeat   = hist.shape[3];
@@ -731,6 +828,7 @@ async function runTraining(opts = {}){
     outUnits: options.outUnits || 24,
     outDropout: options.outDropout || 0.25,
     useListNet: options.useListNet || false,
+    preEncodeHistory: options.preEncodeHistory || null,
     compile: true,
   });
 
@@ -788,6 +886,7 @@ async function runTraining(opts = {}){
     callbacks: {
       onEpochBegin: async (epoch) => {
         epochStart = Date.now();
+        // LR schedule (cosine + warmup)
         if (options.scheduler === 'cosine'){
           let newLR = baseLR;
           if (epoch < warmup){ newLR = baseLR * ((epoch + 1) / Math.max(1, warmup)); }
@@ -797,6 +896,26 @@ async function runTraining(opts = {}){
           }
           model.optimizer.learningRate = newLR;
         }
+        // Aux‑loss annealing (optional)
+        if (options.auxSchedule) {
+          const sch = options.auxSchedule;
+          const ep = epoch + 1; // human-friendly epoch index
+          const from = (sch.from != null) ? sch.from : options.auxLossWeight;
+          const to   = (sch.to   != null) ? sch.to   : from;
+          const start= (sch.startEpoch != null) ? sch.startEpoch : Math.floor(options.epochs * 0.45);
+          const end  = (sch.endEpoch   != null) ? sch.endEpoch   : Math.floor(options.epochs * 0.75);
+          let w = from;
+          if (ep < start) w = from;
+          else if (ep >= end) w = to;
+          else {
+            const t = (ep - start) / Math.max(1, (end - start));
+            w = from + (to - from) * t; // linear ramp
+          }
+          setAuxWeight(w);
+        } else {
+          setAuxWeight(options.auxLossWeight != null ? options.auxLossWeight : 0.3);
+        }
+        if (options.labelSmoothing != null) setLabelSmoothing(options.labelSmoothing);
       },
       onEpochEnd: async (epoch, logs) => {
         const ms  = Date.now() - epochStart;
@@ -883,6 +1002,7 @@ async function runTraining(opts = {}){
             learningRate: lr,
             best_by: 'val_loss',
             history,
+            run_options: options,
             ...data.dataMeta,
           }, MODEL_MAIN, runFolder);
         } else { patienceCounter++; }
@@ -897,6 +1017,7 @@ async function runTraining(opts = {}){
             learningRate: lr,
             best_by: 'val_r3',
             history,
+            run_options: options,
             ...data.dataMeta,
           }, 'model_best_r3.json', runFolder);
         }
@@ -1018,7 +1139,7 @@ if (require.main === module) {
     const m = a.match(/^--([^=]+)=(.+)$/);
     if (m) {
       const k = m[1]; let v = m[2];
-      if (v === 'true' || v === 'false') v = v === 'true';
+      if (v === 'true' || v === 'false') v = (v === 'true');
       else if (!isNaN(Number(v))) v = Number(v);
       opts[k] = v;
     }

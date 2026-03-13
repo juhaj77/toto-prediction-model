@@ -10,8 +10,33 @@
 // ═══════════════════════════════════════════════════════════════════════════════
 
 'use strict';
-
-const tf = require('@tensorflow/tfjs');
+// runner-lr1e-3-reg
+let TFJS_BACKEND_LABEL = 'tfjs-node-gpu';
+let tf;
+(function selectTfBackend(){
+  const envPref = (process.env.TFJS_BACKEND || '').toLowerCase();
+  let argPref = '';
+  for (const a of process.argv || []){
+    const m = a.match(/^--(?:backend|tfjs)=([^=]+)$/i);
+    if (m) { argPref = String(m[1]).toLowerCase(); break; }
+  }
+  const pref = (argPref || envPref).trim();
+  const wantsGPU = ['gpu','tfjs-node-gpu','cuda','nvidia','device:gpu'].includes(pref);
+  const wantsCPU = ['cpu','tfjs-node','node','device:cpu'].includes(pref);
+  function tryReq(name){ try { return require(name); } catch(e){ return null; } }
+  if (wantsCPU){
+    tf = tryReq('@tensorflow/tfjs-node');
+    if (!tf){ tf = tryReq('@tensorflow/tfjs-node-gpu'); TFJS_BACKEND_LABEL = tf ? 'tfjs-node-gpu' : 'missing'; }
+    else { TFJS_BACKEND_LABEL = 'tfjs-node'; }
+  } else {
+    tf = tryReq('@tensorflow/tfjs-node-gpu');
+    if (!tf){ tf = tryReq('@tensorflow/tfjs-node'); TFJS_BACKEND_LABEL = tf ? 'tfjs-node' : 'missing'; }
+    else { TFJS_BACKEND_LABEL = 'tfjs-node-gpu'; }
+  }
+  if (!tf){
+    throw new Error('Unable to load TensorFlow.js backend. Install @tensorflow/tfjs-node or @tensorflow/tfjs-node-gpu.');
+  }
+})();
 const fs = require('fs');
 
 // References
@@ -76,8 +101,9 @@ function recallAt05(yTrue, yPred) {
 
 // ─── MODEL PERSISTENCE ────────────────────────────────────────────────────────
 
-async function saveModel(model, meta = {}, fileName = MODEL) {
-    if (!fs.existsSync(MODEL_FOLDER)) fs.mkdirSync(MODEL_FOLDER);
+async function saveModel(model, meta = {}, fileName = MODEL, folder = MODEL_FOLDER) {
+    const outDir = folder || MODEL_FOLDER;
+    if (!fs.existsSync(outDir)) fs.mkdirSync(outDir, { recursive: true });
     await model.save(tf.io.withSaveHandler(async (artifacts) => {
         const payload = {
             modelTopology: artifacts.modelTopology,
@@ -87,8 +113,8 @@ async function saveModel(model, meta = {}, fileName = MODEL) {
                 savedAt:       new Date().toISOString(),
                 epoch:         meta.epoch         ?? null,
                 loss:          meta.loss          ?? null,
-                val_loss:      meta.val_loss       ?? null,
-                val_acc:       meta.val_acc        ?? null,
+                val_loss:      meta.val_loss      ?? null,
+                val_acc:       meta.val_acc       ?? null,
                 val_auc:       meta.val_auc       ?? null,
                 val_ap:        meta.val_ap        ?? null,
                 // Runner model: optional race-style metrics when available
@@ -99,18 +125,20 @@ async function saveModel(model, meta = {}, fileName = MODEL) {
                 val_best_threshold: meta.val_best_threshold ?? meta.recommended_threshold ?? null,
                 val_f1_best:   meta.val_f1_best   ?? null,
                 best_by:       meta.best_by       ?? 'val_loss',
-                learningRate:  meta.learningRate   ?? null,
-                dataStartDate: meta.dataStartDate  ?? null,
-                dataEndDate:   meta.dataEndDate    ?? null,
-                totalRaces:    meta.totalRaces     ?? null,
-                totalRunners:  meta.totalRunners   ?? null,
+                learningRate:  meta.learningRate  ?? null,
+                dataStartDate: meta.dataStartDate ?? null,
+                dataEndDate:   meta.dataEndDate   ?? null,
+                totalRaces:    meta.totalRaces    ?? null,
+                totalRunners:  meta.totalRunners  ?? null,
                 recommended_threshold: meta.recommended_threshold ?? null,
-                calibration:   meta.calibration    ?? null,
+                calibration:   meta.calibration   ?? null,
                 metrics_at_selection: meta.metrics_at_selection ?? null,
-                history:       meta.history        ?? null,
+                history:       meta.history       ?? null,
+                tfjs_backend:  meta.tfjs_backend  ?? TFJS_BACKEND_LABEL,
+                run_options:   meta.run_options   ?? null,
             },
         };
-        fs.writeFileSync(`${MODEL_FOLDER}/${fileName}`, JSON.stringify(payload));
+        fs.writeFileSync(`${outDir}/${fileName}`, JSON.stringify(payload));
         return { modelArtifactsInfo: { dateSaved: new Date(), modelTopologyType: 'JSON' } };
     }));
 }
@@ -206,6 +234,7 @@ function loadData(filePath, isTraining = true) {
 
     // ── Per-breed mean imputation values ─────────────────────────────────────
     // Used when a runner's record or a historical km time is missing.
+
     const breedStats = { SH: { records: [], kmTimes: [] }, LV: { records: [], kmTimes: [] } };
     for (const race of races) {
         const breed = race.isColdBlood ? 'SH' : 'LV';
@@ -294,7 +323,7 @@ function loadData(filePath, isTraining = true) {
             const frontKnown  = (frontStr === 'HAS_SHOES' || frontStr === 'NO_SHOES') ? 1 : 0;
             const rearActive  = rearStr  === 'HAS_SHOES' ? 1 : 0;
             const rearKnown   = (rearStr  === 'HAS_SHOES' || rearStr  === 'NO_SHOES') ? 1 : 0;
-
+            //runner-lr1e-3-reg
             // ── Special cart encoding ─────────────────────────────────────────
             const cartStr    = (runner.specialCart || '').toUpperCase();
             const cartActive = cartStr === 'YES' ? 1 : 0;
@@ -326,10 +355,13 @@ function loadData(filePath, isTraining = true) {
             const staticFeats = [
                 (runner.number || 1) / 20,                                        // [0]  start number
                 getID(maps.coaches, runner.coach,  'coach')  / 6000,         // [1]  coach ID. Currently 4649
-                (runner.record || means[breed].record) / 50,                      // [2]  race record (imputed if missing)
+                runner.record ? 1 : 0,                                            // is record known
+                (runner.record || 0) / 50,                                         // [2]  race record (imputed if missing)
                 getID(maps.drivers, runner.driver, 'driver') / 5000,         // [3]  current driver ID Currently 3759
+                runner.age ? 1 : 0,
                 (runner.age || 5) / 15,                                           // [4]  age
                 (runner.gender || 2) / 3,                                         // [5]  gender (1=mare 2=gelding 3=stallion)
+                race.isColdBlood ? 1 : 0,
                 race.isColdBlood ? 1 : 0,                                         // [6]  cold blood breed
                 frontActive, frontKnown,                                          // [7-8]   front shoes on / known
                 rearActive,  rearKnown,                                           // [9-10]  rear shoes on / known
@@ -363,9 +395,9 @@ function loadData(filePath, isTraining = true) {
                     ? Math.min(365, (raceDate - startDate) / 86400000)
                     : 30;
 
-                const kmNorm  = normaliseKmTime(ps.kmTime, ps.distance);
-                const kmKnown = kmNorm > 0 ? 1 : 0;
-                const kmFinal = kmKnown ? kmNorm / 100 : means[breed].km / 100;
+               // const kmNorm  = normaliseKmTime(ps.kmTime, ps.distance);
+                const kmKnown = ps.kmTime > 0 ? 1 : 0;
+               // const kmFinal = kmKnown ? ps.kmTime / 100 : means[breed].km / 100;
 
                 const distKnown  = (ps.distance   || 0) > 0 ? 1 : 0;
                 const distFinal  = distKnown  ? (ps.distance   / 3100) : 0.67;
@@ -384,7 +416,7 @@ function loadData(filePath, isTraining = true) {
                 const pscart  = (ps.specialCart || '').toUpperCase();
 
                 histSeq.push([
-                    kmFinal,    kmKnown,                                           // [0-1]   km time normalised to 2100 m
+                    ps.kmTime / 100,    kmKnown,                                           // [0-1]   km time normalised to 2100 m
                     distFinal,  distKnown,                                         // [2-3]   distance
                     daysSince / 365,                                               // [4]     days since this start
                     posFinal,   posKnown,                                          // [5-6]   finishing position
@@ -459,7 +491,7 @@ function loadData(filePath, isTraining = true) {
         raceIds:            isTraining ? tf.tensor1d(RACE_IDS, 'int32') : null,
         metadata,
         histFeatureCount:   25,
-        staticFeatureCount: 27,
+        staticFeatureCount: 30,
         dataMeta,
     };
 }
@@ -470,40 +502,57 @@ function loadData(filePath, isTraining = true) {
 // Static branch:   Dense(48,L2) → BN → Dense(32,L2) → Dropout(0.2)
 // Combined head:   Dense(48,L2) → BN → Dropout(0.25) → Dense(24) → Dense(1, sigmoid)
 
-function buildModel(timeSteps, histFeatures, staticFeatures) {
+function buildModel(timeSteps, histFeatures, staticFeatures, options = {}) {
+    const opt = Object.assign({
+        learningRate: 3e-4,
+        l2: 5e-4,
+        dropout: 0.2,
+        outDropout: 0.25,
+        swapBNtoLN: false,
+        useLayerNormInStatic: false,
+        runnerLstm2Units: 32,
+        runnerLstm1Units: 64,
+        headUnits: 48,
+        midUnits: 24,
+        useFocalLoss: undefined,
+    }, options);
+    const l2reg = tf.regularizers.l2({ l2: opt.l2 });
     const histInput   = tf.input({ shape: [timeSteps, histFeatures], name: 'history_input' });
     const staticInput = tf.input({ shape: [staticFeatures],          name: 'static_input'  });
 
     // History branch
     let h = tf.layers.masking({ maskValue: -1 }).apply(histInput);
-    h = tf.layers.lstm({ units: 64, returnSequences: true,  recurrentDropout: 0.1,
-        kernelRegularizer: tf.regularizers.l2({ l2: 0.0005 }) }).apply(h);
-    h = tf.layers.lstm({ units: 32, returnSequences: false, recurrentDropout: 0.1,
-        kernelRegularizer: tf.regularizers.l2({ l2: 0.0005 }) }).apply(h);
-    h = tf.layers.batchNormalization().apply(h);
-    h = tf.layers.dropout({ rate: 0.2 }).apply(h);
+    h = tf.layers.lstm({ units: opt.runnerLstm1Units, returnSequences: true,  recurrentDropout: 0.1,
+        kernelRegularizer: l2reg }).apply(h);
+    h = tf.layers.lstm({ units: opt.runnerLstm2Units, returnSequences: false, recurrentDropout: 0.1,
+        kernelRegularizer: l2reg }).apply(h);
+    h = (opt.swapBNtoLN ? tf.layers.layerNormalization() : tf.layers.batchNormalization()).apply(h);
+    h = tf.layers.dropout({ rate: opt.dropout }).apply(h);
 
     // Static branch
     let s = tf.layers.dense({ units: 48, activation: 'relu',
-        kernelRegularizer: tf.regularizers.l2({ l2: 0.0005 }) }).apply(staticInput);
-    s = tf.layers.batchNormalization().apply(s);
+        kernelRegularizer: l2reg }).apply(staticInput);
+    s = (opt.useLayerNormInStatic || opt.swapBNtoLN ? tf.layers.layerNormalization() : tf.layers.batchNormalization()).apply(s);
     s = tf.layers.dense({ units: 32, activation: 'relu',
-        kernelRegularizer: tf.regularizers.l2({ l2: 0.0005 }) }).apply(s);
-    s = tf.layers.dropout({ rate: 0.2 }).apply(s);
+        kernelRegularizer: l2reg }).apply(s);
+    s = tf.layers.dropout({ rate: opt.dropout }).apply(s);
 
     // Combined head
     let out = tf.layers.concatenate().apply([h, s]);
-    out = tf.layers.dense({ units: 48, activation: 'relu',
-        kernelRegularizer: tf.regularizers.l2({ l2: 0.0005 }) }).apply(out);
-    out = tf.layers.batchNormalization().apply(out);
-    out = tf.layers.dropout({ rate: 0.25 }).apply(out);
-    out = tf.layers.dense({ units: 24, activation: 'relu' }).apply(out);
+    out = tf.layers.dense({ units: opt.headUnits, activation: 'relu',
+        kernelRegularizer: l2reg }).apply(out);
+    out = (opt.swapBNtoLN ? tf.layers.layerNormalization() : tf.layers.batchNormalization()).apply(out);
+    out = tf.layers.dropout({ rate: opt.outDropout }).apply(out);
+    out = tf.layers.dense({ units: opt.midUnits, activation: 'relu' }).apply(out);
     out = tf.layers.dense({ units: 1,  activation: 'sigmoid' }).apply(out);
 
     const model = tf.model({ inputs: [histInput, staticInput], outputs: out });
+    const lr = opt.learningRate;
+    const optimizer = tf.train.adam(lr);
+    const useFocal = (opt.useFocalLoss === undefined) ? (typeof USE_FOCAL_LOSS !== 'undefined' && USE_FOCAL_LOSS) : !!opt.useFocalLoss;
     model.compile({
-        optimizer: tf.train.adam(0.0003),
-        loss: USE_FOCAL_LOSS ? focalLoss() : 'binaryCrossentropy',
+        optimizer,
+        loss: useFocal ? focalLoss() : 'binaryCrossentropy',
         metrics: ['accuracy', precisionAt05, recallAt05],
     });
     return model;
@@ -739,10 +788,42 @@ function computePerRaceEvalRunner(yTrueTensor, yPredTensor, raceIdsTensor, k = 3
 
 // ─── TRAINING ─────────────────────────────────────────────────────────────────
 
-async function runTraining() {
-    console.log('--- TRAINING (runner-based) ---');
-    const data  = loadData(TRAINING_DATA, true);
-    const model = buildModel(MAX_HISTORY, data.histFeatureCount, data.staticFeatureCount);
+let __running = false;
+async function runTraining(opts = {}) {
+    if (__running) { console.warn('runTraining (runner) is already running. Ignoring second call.'); return null; }
+    __running = true;
+    const startedAt = new Date();
+    const runId = opts.runId || `${startedAt.toISOString().replace(/[:.]/g,'-')}-${Math.random().toString(36).slice(2,7)}`;
+    const runFolder = `${MODEL_FOLDER}/runs/${runId}`;
+    const options = Object.assign({
+        trainingFile: TRAINING_DATA,
+        epochs: 50,
+        batchSize: 64,
+        learningRate: 3e-4,
+        minLearningRate: 3e-5,
+        scheduler: 'cosine',
+        warmupEpochs: 4,
+        earlyStopPatience: 16,
+        plateauPatience: 5,
+        plateauFactor: 0.5,
+        l2: 5e-4,
+        dropout: 0.2,
+        outDropout: 0.25,
+        swapBNtoLN: false,
+        useLayerNormInStatic: false,
+        runnerLstm1Units: 64,
+        runnerLstm2Units: 32,
+        headUnits: 48,
+        midUnits: 24,
+        useFocalLoss: undefined,
+        bestBy: 'val_auc',
+    }, opts);
+
+    console.log(`--- TRAINING (runner-based) runId=${runId} ---`);
+    if (!fs.existsSync(runFolder)) fs.mkdirSync(runFolder, { recursive: true });
+
+    const data  = loadData(options.trainingFile, true);
+    const model = buildModel(MAX_HISTORY, data.histFeatureCount, data.staticFeatureCount, options);
 
     console.log(`  Tensor shapes — hist: ${data.hist.shape}  static: ${data.static.shape}  y: ${data.y.shape}`);
     console.log('  Metrikat: AUC(ROC) = erotteleva kyky kaikilla kynnyksillä\n' +
@@ -770,13 +851,28 @@ async function runTraining() {
     const history = [];
 
     await model.fit([histTrain, statTrain], yTrain, {
-        epochs:          50,
-        batchSize:       64,
+        epochs:          options.epochs,
+        batchSize:       options.batchSize,
         shuffle:         true,
-        classWeight:     USE_FOCAL_LOSS ? undefined : { 0: cw[0], 1: cw[1] },
+        classWeight:     (options.useFocalLoss === undefined ? (typeof USE_FOCAL_LOSS !== 'undefined' && USE_FOCAL_LOSS) : !!options.useFocalLoss) ? undefined : { 0: cw[0], 1: cw[1] },
         validationData:  [[histVal, statVal], yVal],
         callbacks: {
-            onEpochBegin: async () => { epochStart = Date.now(); },
+            onEpochBegin: async (epoch) => {
+                epochStart = Date.now();
+                if (options.scheduler === 'cosine'){
+                    const baseLR = options.learningRate;
+                    const minLR  = options.minLearningRate;
+                    const totalE = options.epochs;
+                    const warmup = Math.max(0, Math.min(options.warmupEpochs, totalE-1));
+                    let newLR = baseLR;
+                    if (epoch < warmup){ newLR = baseLR * ((epoch + 1) / Math.max(1, warmup)); }
+                    else {
+                        const t = (epoch - warmup) / Math.max(1, (totalE - warmup));
+                        newLR = minLR + 0.5 * (baseLR - minLR) * (1 + Math.cos(Math.PI * t));
+                    }
+                    model.optimizer.learningRate = newLR;
+                }
+            },
             onEpochEnd: async (epoch, logs) => {
                 const ms  = Date.now() - epochStart;
                 const lr  = model.optimizer.learningRate;
@@ -874,8 +970,10 @@ async function runTraining() {
                         calibration:   { type: 'temperature', T: calib.T },
                         metrics_at_selection: { f1_at_t: sweep.best.f1, p_at_t: sweep.best.p, r_at_t: sweep.best.r },
                         history,
+                        run_options:   options,
+                        tfjs_backend:  TFJS_BACKEND_LABEL,
                         ...data.dataMeta,
-                    }, MODEL);
+                    }, MODEL, runFolder);
                 } else {
                     lossPatience++;
                 }
@@ -904,8 +1002,10 @@ async function runTraining() {
                         calibration:   { type: 'temperature', T: calib.T },
                         metrics_at_selection: { f1_at_t: sweep.best.f1, p_at_t: sweep.best.p, r_at_t: sweep.best.r },
                         history,
+                        run_options:   options,
+                        tfjs_backend:  TFJS_BACKEND_LABEL,
                         ...data.dataMeta,
-                    }, 'model_best_auc.json');
+                    }, 'model_best_auc.json', runFolder);
                 } else {
                     aucPatience++;
                 }
@@ -935,7 +1035,7 @@ async function runTraining() {
                         history,
                         ...data.dataMeta,
                     };
-                    await saveModel(model, bestByApMeta, 'model_best_ap.json');
+                    await saveModel(model, { ...bestByApMeta, run_options: options, tfjs_backend: TFJS_BACKEND_LABEL }, 'model_best_ap.json', runFolder);
                 }
 
                 if (aucPatience >= LR_REDUCE_PATIENCE || lossPatience >= LR_REDUCE_PATIENCE) {
@@ -1000,4 +1100,17 @@ async function runPrediction(predictionFile) {
     await runPrediction();
 })();
 */
- runTraining();
+module.exports = { runTraining };
+
+if (require.main === module) {
+  const opts = {};
+  for (const a of process.argv.slice(2)){
+    const m = a.match(/^--([^=]+)=(.*)$/);
+    if (m){
+      const k = m[1]; let v = m[2];
+      if (v === 'true') v = true; else if (v === 'false') v = false; else if (!isNaN(Number(v))) v = Number(v);
+      opts[k] = v;
+    }
+  }
+  runTraining(opts).catch(err => { console.error(err); process.exit(1); });
+}

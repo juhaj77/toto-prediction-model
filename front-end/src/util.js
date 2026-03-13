@@ -116,7 +116,7 @@ export function parsePosition(result) {
 
 // breed field from card/{cardId}/races: 'K' = Finnhorse, 'L' = Warmblood
 export function detectColdBlood(raceInfo) {
-    return raceInfo?.breed === 'K';
+    return raceInfo?.breed === 'K' || raceInfo?.breed ==='S';
 }
 
 // Gender from live API: 'ORI'=stallion(3), 'TAMMA'=mare(1), 'RUUNA'=gelding(2)
@@ -334,9 +334,9 @@ export function buildHistorySequence(validPrev, raceDate, breed, means, driverMa
 
         // ps.kmTime: number from training/normalisePrevStart (null if missing)
         // ps.distance: metres, may be null in older training rows → falls back to 2100
-        const kmNorm  = normaliseKmTime(ps.kmTime, ps.distance);
-        const kmKnown = kmNorm > 0 ? 1 : 0;
-        const kmFinal = kmKnown ? kmNorm / 100 : means[breed].km / 100;
+        //const kmNorm  = normaliseKmTime(ps.kmTime, ps.distance);
+        const kmKnown = ps.kmTime > 0 ? 1 : 0;
+        //const kmFinal = kmKnown ? kmNorm / 100 : means[breed].km / 100;
 
         const distKnown  = (ps.distance || 0) > 0 ? 1 : 0;
         const distFinal  = distKnown ? ps.distance / 3100 : 0.67;
@@ -361,7 +361,7 @@ export function buildHistorySequence(validPrev, raceDate, breed, means, driverMa
         const pscart  = (ps.specialCart || '').toUpperCase();
 
         histSeq.push([
-            kmFinal,    kmKnown,                                           // [0-1]
+            ps.kmTime / 100, kmKnown,                                           // [0-1]
             distFinal,  distKnown,                                         // [2-3]
             daysSince / 365,                                               // [4]
             posFinal,   posKnown,                                          // [5-6]
@@ -412,10 +412,13 @@ export function buildStaticFeatures(runner, opts) {
     const base = [
         (runner.number || 1) / 20,                                        // [0]
         getID(coachMap,  runner.coach,  'coach')  / 6000,                 // [1]
-        (runner.record || means[breed].record) / 50,                      // [2]
+        runner.record ? 1 : 0,
+        (runner.record || 0) / 50,                      // [2]
         getID(driverMap, runner.driver, 'driver') / 5000,                 // [3]
-        (runner.age || 5) / 15,                                           // [4]
+        runner.age ? 1 : 0,
+        (runner.age || 0) / 15,                                           // [4]
         (runner.gender || 2) / 3,                                         // [5]  1=mare 2=gelding 3=stallion
+        isColdBlood ? 1 : 0,
         isColdBlood ? 1 : 0,                                              // [6]
         frontActive, frontKnown,                                          // [7-8]
         rearActive,  rearKnown,                                           // [9-10]
@@ -511,7 +514,7 @@ export function buildRaceBasedFeatures(runners, maps, raceDate, raceDistance, is
     for (let slot = 0; slot < MAX_RUNNERS; slot++) {
         const runner = starters[slot];
         if (!runner) {
-            raceStatic.push(new Array(25).fill(0));
+            raceStatic.push(new Array(28).fill(0));
             raceHist.push(Array.from({ length: MAX_HISTORY }, () => new Array(25).fill(-1)));
             raceMask.push([0]);
             continue;

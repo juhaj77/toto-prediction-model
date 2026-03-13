@@ -176,6 +176,8 @@ async function fetchDay(dateStr) {
             continue;
         }
 
+
+
         const raceList = racesData.collection || racesData.races || [];
 
         // Fetch the canonical meet date from the card endpoint
@@ -196,7 +198,7 @@ async function fetchDay(dateStr) {
         for (const raceInfo of raceList) {
             const raceId      = String(raceInfo.raceId || raceInfo.id);
             const raceDistance = parseInt(raceInfo.distance || 2100);
-            const isColdBlood  = (raceInfo.breed === 'K' || raceInfo.breed === 'FINNHORSE');
+            const isColdBlood  = (raceInfo.breed === 'K' || raceInfo.breed === 'S' || raceInfo.breed === 'FINNHORSE');
             const isCarStart   = (raceInfo.startType === 'CAR_START' || raceInfo.startType === 'AUTO');
 
             await sleep(150);

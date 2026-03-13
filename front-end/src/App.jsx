@@ -379,10 +379,10 @@ export default function App() {
                 }
             }
 
-            setPredictions(
-                variant.extractScores(scores, metadata)
-                    .sort((a, b) => b.prob - a.prob)
-            );
+            const preds = variant
+                .extractScores(scores, metadata)
+                .sort((a, b) => b.prob - a.prob);
+            setPredictions(preds);
         } catch (e) {
             console.error(e);
             setError(e.message || 'Unknown error during prediction');

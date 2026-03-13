@@ -256,7 +256,7 @@ function cellColor(colKey, row) {
 
 // Detect cold blood (Finnhorse) from sire/dam — same logic as App.jsx.
 function detectColdBlood(raceInfo, runnerSample) {
-    if (raceInfo?.breed === 'K' || raceInfo?.breed === 'FINNHORSE') return true;
+    if (raceInfo?.breed === 'K' || raceInfo?.breed === 'S' ||  raceInfo?.breed === 'FINNHORSE') return true;
     if (raceInfo?.breed && raceInfo.breed !== '') return false;
     if (!runnerSample) return false;
     const sire = runnerSample.sire || '';

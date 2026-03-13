@@ -21,10 +21,35 @@
 
 'use strict';
 
-const tf = require('@tensorflow/tfjs-node-gpu');
+let TFJS_BACKEND_LABEL = 'tfjs-node-gpu';
+let tf;
+(function selectTfBackend(){
+  const envPref = (process.env.TFJS_BACKEND || '').toLowerCase();
+  let argPref = '';
+  for (const a of process.argv || []){
+    const m = a.match(/^--(?:backend|tfjs)=([^=]+)$/i);
+    if (m) { argPref = String(m[1]).toLowerCase(); break; }
+  }
+  const pref = (argPref || envPref).trim();
+  const wantsGPU = ['gpu','tfjs-node-gpu','cuda','nvidia','device:gpu'].includes(pref);
+  const wantsCPU = ['cpu','tfjs-node','node','device:cpu'].includes(pref);
+  function tryReq(name){ try { return require(name); } catch(e){ return null; } }
+  if (wantsCPU){
+    tf = tryReq('@tensorflow/tfjs-node');
+    if (!tf){ tf = tryReq('@tensorflow/tfjs-node-gpu'); TFJS_BACKEND_LABEL = tf ? 'tfjs-node-gpu' : 'missing'; }
+    else { TFJS_BACKEND_LABEL = 'tfjs-node'; }
+  } else {
+    tf = tryReq('@tensorflow/tfjs-node-gpu');
+    if (!tf){ tf = tryReq('@tensorflow/tfjs-node'); TFJS_BACKEND_LABEL = tf ? 'tfjs-node' : 'missing'; }
+    else { TFJS_BACKEND_LABEL = 'tfjs-node-gpu'; }
+  }
+  if (!tf){
+    throw new Error('Unable to load TensorFlow.js backend. Install @tensorflow/tfjs-node or @tensorflow/tfjs-node-gpu.');
+  }
+})();
 const { MultiHeadAttention } = require('./MultiHeadAttention.js')
 const fs = require('fs');
-
+//runId:race-ln
 const TRAINING_DATA = './training_data.json';
 const MAPPINGS_FILE = './mappings_race.json';
 const MODEL_FOLDER  = './model-race';
@@ -133,8 +158,9 @@ function combinedRaceLoss(weight = AUX_LOSS_WEIGHT) {
 
 // ─── MODEL PERSISTENCE ────────────────────────────────────────────────────────
 
-async function saveModel(model, meta = {}, fileName = MODEL) {
-    if (!fs.existsSync(MODEL_FOLDER)) fs.mkdirSync(MODEL_FOLDER);
+async function saveModel(model, meta = {}, fileName = MODEL, folder = MODEL_FOLDER) {
+    const outDir = folder || MODEL_FOLDER;
+    if (!fs.existsSync(outDir)) fs.mkdirSync(outDir, { recursive: true });
     await model.save(tf.io.withSaveHandler(async (artifacts) => {
         const payload = {
             modelTopology: artifacts.modelTopology,
@@ -144,8 +170,8 @@ async function saveModel(model, meta = {}, fileName = MODEL) {
                 savedAt:       new Date().toISOString(),
                 epoch:         meta.epoch         ?? null,
                 loss:          meta.loss          ?? null,
-                val_loss:      meta.val_loss       ?? null,
-                val_acc:       meta.val_acc        ?? null,
+                val_loss:      meta.val_loss      ?? null,
+                val_acc:       meta.val_acc       ?? null,
                 val_r3:        meta.val_r3        ?? null,
                 val_p3:        meta.val_p3        ?? null,
                 val_auc:       meta.val_auc       ?? null,
@@ -156,15 +182,17 @@ async function saveModel(model, meta = {}, fileName = MODEL) {
                 val_best_threshold: meta.val_best_threshold ?? null,
                 val_f1_best:   meta.val_f1_best   ?? null,
                 best_by:       meta.best_by       ?? 'val_loss',
-                learningRate:  meta.learningRate   ?? null,
-                dataStartDate: meta.dataStartDate  ?? null,
-                dataEndDate:   meta.dataEndDate    ?? null,
-                totalRaces:    meta.totalRaces     ?? null,
-                totalRunners:  meta.totalRunners   ?? null,
-                history:       meta.history        ?? null,
+                learningRate:  meta.learningRate  ?? null,
+                dataStartDate: meta.dataStartDate ?? null,
+                dataEndDate:   meta.dataEndDate   ?? null,
+                totalRaces:    meta.totalRaces    ?? null,
+                totalRunners:  meta.totalRunners  ?? null,
+                history:       meta.history       ?? null,
+                tfjs_backend:  meta.tfjs_backend  ?? TFJS_BACKEND_LABEL,
+                run_options:   meta.run_options   ?? null,
             },
         };
-        fs.writeFileSync(`${MODEL_FOLDER}/${fileName}`, JSON.stringify(payload));
+        fs.writeFileSync(`${outDir}/${fileName}`, JSON.stringify(payload));
         return { modelArtifactsInfo: { dateSaved: new Date(), modelTopologyType: 'JSON' } };
     }));
 }
@@ -287,7 +315,7 @@ function loadData(filePath) {
 
             if (!runner) {
                 // Padding slot
-                raceStatic.push(new Array(25).fill(0));
+                raceStatic.push(new Array(28).fill(0));
                 raceHist.push(Array.from({ length: MAX_HISTORY }, () => new Array(25).fill(-1)));
                 raceY.push([0]);   // padding slots never count as top-3
                 raceMask.push([0]);
@@ -334,10 +362,13 @@ function loadData(filePath) {
             raceStatic.push([
                 (runner.number || 1) / 20,                                        // [0]  start number
                 getID(maps.coaches, runner.coach,  'coach')  / 6000,              // [1]  coach ID
-                (runner.record || means[breed].record) / 50,                      // [2]  race record (imputed if missing)
+                runner.record ? 1 : 0,
+                (runner.record || 0) / 50,                      // [2]  race record (imputed if missing)
                 getID(maps.drivers, runner.driver, 'driver') / 5000,              // [3]  current driver ID
-                (runner.age || 5) / 15,                                           // [4]  age
+                runner.age ? 1 : 0,
+                (runner.age || 0) / 15,                                           // [4]  age
                 (runner.gender || 2) / 3,                                         // [5]  gender (1=mare 2=gelding 3=stallion)
+                race.isColdBlood ? 1 : 0,
                 race.isColdBlood ? 1 : 0,                                         // [6]  cold blood breed
                 frontActive, frontKnown,                                          // [7-8]   front shoes on / known
                 rearActive,  rearKnown,                                           // [9-10]  rear shoes on / known
@@ -369,9 +400,9 @@ function loadData(filePath) {
                     ? Math.min(365, (raceDate - startDate) / 86400000)
                     : 30;
 
-                const kmNorm  = normaliseKmTime(ps.kmTime, ps.distance);
-                const kmKnown = kmNorm > 0 ? 1 : 0;
-                const kmFinal = kmKnown ? kmNorm / 100 : means[breed].km / 100;
+                //const kmNorm  = normaliseKmTime(ps.kmTime, ps.distance);
+                const kmKnown = ps.kmTime > 0 ? 1 : 0;
+                //const kmFinal = kmKnown ? kmNorm / 100 : means[breed].km / 100;
 
                 const distKnown  = (ps.distance   || 0) > 0 ? 1 : 0;
                 const distFinal  = distKnown ? ps.distance / 3100 : 0.67;
@@ -394,7 +425,7 @@ function loadData(filePath) {
                 const pscart  = (ps.specialCart || '').toUpperCase();
 
                 histSeq.push([
-                    kmFinal,    kmKnown,                                           // [0-1]
+                    ps.kmTime / 100,    kmKnown,                                           // [0-1]
                     distFinal,  distKnown,                                         // [2-3]
                     daysSince / 365,                                               // [4]
                     posFinal,   posKnown,                                          // [5-6]
@@ -457,7 +488,7 @@ function loadData(filePath) {
         mask:               tf.tensor3d(X_mask),
         y:                  tf.tensor3d(Y),
         histFeatureCount:   25,
-        staticFeatureCount: 25,
+        staticFeatureCount: 28,
         dataMeta,
     };
 }
@@ -476,7 +507,8 @@ function loadData(filePath) {
 // Output shape:
 //   [MAX_RUNNERS, 1]  — top-3 probability per runner slot
 
-function buildModel(maxRunners, timeSteps, histFeatures, staticFeatures) {
+function buildModel(maxRunners, timeSteps, histFeatures, staticFeatures, options = {}) {
+    const opt = Object.assign({ attnHeads: 8, embedDim: 64, ffnDim: 128, dropout: 0.2, outDropout: 0.25, outUnits: 24, l2: 5e-4, swapBNtoLN: false, useLayerNormInStatic: false, auxLossWeight: 0.4, useListNet: false, autoFixHeads: true, learningRate: 3e-4 }, options);
     const histInput   = tf.input({ shape: [maxRunners, timeSteps, histFeatures], name: 'history_input' });
     const staticInput = tf.input({ shape: [maxRunners, staticFeatures],          name: 'static_input'  });
     const maskInput   = tf.input({ shape: [maxRunners, 1],                       name: 'mask_input'    });
@@ -533,8 +565,8 @@ function buildModel(maxRunners, timeSteps, histFeatures, staticFeatures) {
     // Shape: [batch, maxRunners, 48]
 
     s = tf.layers.timeDistributed({
-        layer: tf.layers.batchNormalization(),
-        name: 'static_bn',
+        layer: (opt.useLayerNormInStatic || opt.swapBNtoLN) ? tf.layers.layerNormalization() : tf.layers.batchNormalization(),
+        name: (opt.useLayerNormInStatic || opt.swapBNtoLN) ? 'static_ln' : 'static_bn',
     }).apply(s);
 
     s = tf.layers.timeDistributed({
@@ -553,52 +585,70 @@ function buildModel(maxRunners, timeSteps, histFeatures, staticFeatures) {
     // Shape: [batch, maxRunners, 64]
 
     combined = tf.layers.timeDistributed({
-        layer: tf.layers.dense({ units: 64, activation: 'relu' }),
+        layer: tf.layers.dense({ units: opt.embedDim, activation: 'relu' }),
         name: 'combined_dense',
     }).apply(combined);
 
-    combined = tf.layers.timeDistributed({
-        layer: tf.layers.batchNormalization(),
-        name: 'combined_bn',
+combined = tf.layers.timeDistributed({
+        layer: (opt.swapBNtoLN ? tf.layers.layerNormalization() : tf.layers.batchNormalization()),
+        name: (opt.swapBNtoLN ? 'combined_ln' : 'combined_bn'),
     }).apply(combined);
-    // Shape: [batch, maxRunners, 64]
+// Shape: [batch, maxRunners, opt.embedDim]
 
-    // ── Multi-Head Attention ──────────────────────────────────────────────────
-    // Self-attention over the runner dimension: the model learns which other
-    // horses in the race are relevant when scoring each individual runner.
-    // Query = Key = Value = combined  →  numHeads=4, keyDim=16 → 64-dim output
+// ── Multi-Head Attention ──────────────────────────────────────────────────
+// Self-attention over the runner dimension: the model learns which other
+// horses in the race are relevant when scoring each individual runner.
+// Query = Key = Value = combined
 
-    // Pre-LayerNorm before attention (stabilizes training)
-    const preAttn = tf.layers.layerNormalization({ name: 'pre_attention_ln' }).apply(combined);
+// Pre-LayerNorm before attention (stabilizes training)
+const preAttn = tf.layers.layerNormalization({ name: 'pre_attention_ln' }).apply(combined);
 
-    const attended = new MultiHeadAttention({
-        numHeads: 8,
-        embedDim:   64, // match combined's last-dim (64) so downstream projection works
+// Guard: ensure embedDim divisible by attnHeads
+if (opt.embedDim % opt.attnHeads !== 0) {
+    if (opt.autoFixHeads) {
+        const fixed = Math.max(opt.attnHeads, Math.floor(opt.embedDim / opt.attnHeads) * opt.attnHeads);
+        if (fixed > 0 && fixed !== opt.embedDim) {
+            console.warn(`RaceModel: embedDim (${opt.embedDim}) not divisible by attnHeads (${opt.attnHeads}). Adjusting embedDim → ${fixed}.`);
+            opt.embedDim = fixed;
+        } else {
+            const prefer = [16, 12, 8, 6, 4, 2];
+            const newHeads = prefer.find(h => opt.embedDim % h === 0) || 1;
+            console.warn(`RaceModel: cannot adjust embedDim safely. Adjusting attnHeads ${opt.attnHeads} → ${newHeads}.`);
+            opt.attnHeads = newHeads;
+        }
+    } else {
+        throw new Error(`RaceModel config error: embedDim (${opt.embedDim}) must be divisible by attnHeads (${opt.attnHeads}).`);
+    }
+}
+
+const attended = new MultiHeadAttention({
+        numHeads: opt.attnHeads,
+        embedDim: opt.embedDim,
         dropout:  0.1,
     }).apply(preAttn);
-    // Shape: [batch, maxRunners, 64]
+// Shape: [batch, maxRunners, opt.embedDim]
 
-    // Residual-style fusion: concatenate [combined, attended] -> project -> LayerNorm.
-    const fused = tf.layers.concatenate({ axis: -1, name: 'attention_fuse_concat' }).apply([combined, attended]);
-    const fusedProj = tf.layers.timeDistributed({
-        layer: tf.layers.dense({ units: 64, activation: 'linear' }),
+// Residual-style fusion: concatenate [combined, attended] -> project -> LayerNorm.
+const fused = tf.layers.concatenate({ axis: -1, name: 'attention_fuse_concat' }).apply([combined, attended]);
+const fusedProj = tf.layers.timeDistributed({
+        layer: tf.layers.dense({ units: opt.embedDim, activation: 'linear' }),
         name: 'attention_fuse_proj',
     }).apply(fused);
-    let normed   = tf.layers.layerNormalization({ name: 'attention_ln' }).apply(fusedProj);
+let normed   = tf.layers.layerNormalization({ name: 'attention_ln' }).apply(fusedProj);
 
-    // Feed-Forward block (FFN) with residual + LayerNorm
-    let ffn = tf.layers.timeDistributed({
-        layer: tf.layers.dense({ units: 128, activation: 'relu' }),
+// Feed-Forward block (FFN) with residual + LayerNorm
+let ffn = tf.layers.timeDistributed({
+        layer: tf.layers.dense({ units: opt.ffnDim, activation: 'relu' }),
         name: 'ffn_dense1',
     }).apply(normed);
 
-    ffn = tf.layers.timeDistributed({
-        layer: tf.layers.dropout({ rate: 0.2 }),
+ffn = tf.layers.timeDistributed({
+        layer: tf.layers.dropout({ rate: opt.dropout }),
         name: 'ffn_dropout',
     }).apply(ffn);
 
-    ffn = tf.layers.timeDistributed({
-        layer: tf.layers.dense({ units: 64, activation: 'linear' }),
+ffn = tf.layers.timeDistributed({
+        layer: tf.layers.dense({ units: opt.embedDim, activation: 'linear' }),
         name: 'ffn_dense2',
     }).apply(ffn);
 
@@ -626,11 +676,12 @@ function buildModel(maxRunners, timeSteps, histFeatures, staticFeatures) {
     // Shape: [batch, maxRunners, 1]
 
     const model = tf.model({ inputs: [histInput, staticInput, maskInput], outputs: out });
-    // Try to add gradient clipping if supported; tfjs-layers Adam doesn't expose clipNorm directly in all versions.
-    const optimizer = tf.train.adam(0.0003);
+    // Optimizer/loss from options
+    const optimizer = tf.train.adam(opt.learningRate);
+    const lossFn = opt.useListNet ? (yTrue, yPred)=> topKSoftAuxLoss(yTrue, yPred, 3, 0.1) : combinedRaceLoss(opt.auxLossWeight);
     model.compile({
         optimizer,
-        loss:      combinedRaceLoss(AUX_LOSS_WEIGHT),
+        loss:      lossFn,
         metrics:   ['accuracy', recallAtThree, precisionAtThree],
     });
     return model;
@@ -801,14 +852,51 @@ function computePerRaceEval(yTrue, yPred, mask, k = 3) {
 
 // ─── TRAINING ─────────────────────────────────────────────────────────────────
 
-async function runTraining() {
-    console.log('--- TRAINING (race-based) ---');
-    const data  = loadData(TRAINING_DATA);
-    const model = buildModel(MAX_RUNNERS, MAX_HISTORY, data.histFeatureCount, data.staticFeatureCount);
+let __running = false;
+async function runTraining(opts = {}) {
+    if (__running) { console.warn('runTraining (race) is already running. Ignoring second call.'); return null; }
+    __running = true;
+    const startedAt = new Date();
+    const runId = opts.runId || `${startedAt.toISOString().replace(/[:.]/g,'-')}-${Math.random().toString(36).slice(2,7)}`;
+    const runFolder = `${MODEL_FOLDER}/runs/${runId}`;
+    const options = Object.assign({
+        trainingFile: TRAINING_DATA,
+        valFraction: 0.1,
+        temporalSplit: true,
+        seed: 1337,
+        epochs: 50,
+        batchSize: 512,
+        learningRate: 3e-4,
+        minLearningRate: 3e-5,
+        scheduler: 'plateau',
+        warmupEpochs: 0,
+        earlyStopPatience: 16,
+        plateauPatience: 5,
+        plateauFactor: 0.5,
+        auxLossWeight: 0.4,
+        useListNet: false,
+        attnHeads: 8,
+        embedDim: 64,
+        ffnDim: 128,
+        dropout: 0.2,
+        outDropout: 0.25,
+        outUnits: 24,
+        l2: 5e-4,
+        bestBy: 'val_ndcg3',
+        swapBNtoLN: false,
+        useLayerNormInStatic: false,
+        autoFixHeads: true,
+    }, opts);
+
+    console.log(`--- TRAINING (race-based) runId=${runId} ---`);
+    if (!fs.existsSync(runFolder)) fs.mkdirSync(runFolder, { recursive: true });
+
+    const data  = loadData(options.trainingFile);
+    const model = buildModel(MAX_RUNNERS, MAX_HISTORY, data.histFeatureCount, data.staticFeatureCount, options);
 
     // Deterministic split at race level so we can predict full validation for metrics
     const { histTrain, statTrain, maskTrain, yTrain, histVal, statVal, maskVal, yVal } = splitTrainValRaces(
-        data.hist, data.static, data.mask, data.y, 0.1, 1337
+        data.hist, data.static, data.mask, data.y, options.valFraction, options.seed
     );
 
     console.log(`  Tensor shapes — hist: ${data.hist.shape}  static: ${data.static.shape}  y: ${data.y.shape}`);
@@ -819,21 +907,39 @@ async function runTraining() {
 
     let bestValLoss     = Infinity;
     let bestValR3       = -Infinity;
+    let bestValAUC      = -Infinity;
+    let bestValNDCG3    = -Infinity;
     let patienceCounter = 0;     // val_loss patience
     let r3PatienceCount = 0;     // val_r3 patience
-    const EARLY_STOP_PATIENCE = 16;
-    const LR_REDUCE_PATIENCE  = 5;
+    const EARLY_STOP_PATIENCE = options.earlyStopPatience;
+    const LR_REDUCE_PATIENCE  = options.plateauPatience;
     let epochStart;
     const history = [];
 
+    const baseLR = options.learningRate;
+    const minLR  = options.minLearningRate;
+    const totalE = options.epochs;
+    const warmup = Math.max(0, Math.min(options.warmupEpochs, totalE-1));
+
     await model.fit([histTrain, statTrain, maskTrain], yTrain, {
-        epochs:          50,
-        batchSize:       512,   // smaller batch due to 4D tensors
+        epochs:          options.epochs,
+        batchSize:       options.batchSize,
         shuffle:         true,
         validationData:  [[histVal, statVal, maskVal], yVal],
         // sampleWeight is not supported in tfjs-layers; padding is handled via mask_input gating.
         callbacks: {
-            onEpochBegin: async () => { epochStart = Date.now(); },
+            onEpochBegin: async (epoch) => {
+                epochStart = Date.now();
+                if (options.scheduler === 'cosine'){
+                    let newLR = baseLR;
+                    if (epoch < warmup){ newLR = baseLR * ((epoch + 1) / Math.max(1, warmup)); }
+                    else {
+                        const t = (epoch - warmup) / Math.max(1, (totalE - warmup));
+                        newLR = minLR + 0.5 * (baseLR - minLR) * (1 + Math.cos(Math.PI * t));
+                    }
+                    model.optimizer.learningRate = newLR;
+                }
+            },
             onEpochEnd: async (epoch, logs) => {
                 const ms  = Date.now() - epochStart;
                 const lr  = model.optimizer.learningRate;
@@ -914,8 +1020,10 @@ async function runTraining() {
                         learningRate:  lr,
                         best_by:       'val_loss',
                         history,
+                        run_options:   options,
+                        tfjs_backend:  TFJS_BACKEND_LABEL,
                         ...data.dataMeta,
-                    }, MODEL);
+                    }, MODEL, runFolder);
                 } else {
                     patienceCounter++;
                 }
@@ -956,10 +1064,66 @@ async function runTraining() {
                         learningRate:  lr,
                         best_by:       'val_r3',
                         history,
+                        run_options:   options,
+                        tfjs_backend:  TFJS_BACKEND_LABEL,
                         ...data.dataMeta,
-                    }, 'model_best_r3.json');
+                    }, 'model_best_r3.json', runFolder);
                 } else {
                     r3PatienceCount++;
+                }
+
+                // Track and save by best AUC (ROC)
+                if (rocAuc > bestValAUC) {
+                    bestValAUC = rocAuc;
+                    console.log('   🌟 New best val_auc — saving...');
+                    await saveModel(model, {
+                        epoch:         epoch + 1,
+                        loss:          Math.round(logs.loss * 10000) / 10000,
+                        val_loss:      Math.round(logs.val_loss * 10000) / 10000,
+                        val_acc:       Math.round((logs.val_acc || logs.val_accuracy || 0) * 10000) / 10000,
+                        val_r3:        Math.round(r3ValNum * 10000) / 10000,
+                        val_p3:        Math.round(p3ValNum * 10000) / 10000,
+                        val_auc:       Math.round(rocAuc * 10000) / 10000,
+                        val_ndcg3:     Math.round(perRace.ndcgK * 10000) / 10000,
+                        val_hit1:      Math.round(perRace.hit1 * 10000) / 10000,
+                        val_ap_macro:  Math.round(perRace.apMacro * 10000) / 10000,
+                        val_logloss_race: Math.round(perRace.loglossRace * 10000) / 10000,
+                        val_best_threshold: history[history.length-1]?.val_best_threshold ?? null,
+                        val_f1_best:   history[history.length-1]?.val_f1_best ?? null,
+                        learningRate:  lr,
+                        best_by:       'val_auc',
+                        history,
+                        run_options:   options,
+                        tfjs_backend:  TFJS_BACKEND_LABEL,
+                        ...data.dataMeta,
+                    }, 'model_best_auc.json', runFolder);
+                }
+
+                // Track and save by best NDCG@3
+                if (perRace.ndcgK > bestValNDCG3) {
+                    bestValNDCG3 = perRace.ndcgK;
+                    console.log('   🌟 New best ndcg@3 — saving...');
+                    await saveModel(model, {
+                        epoch:         epoch + 1,
+                        loss:          Math.round(logs.loss * 10000) / 10000,
+                        val_loss:      Math.round(logs.val_loss * 10000) / 10000,
+                        val_acc:       Math.round((logs.val_acc || logs.val_accuracy || 0) * 10000) / 10000,
+                        val_r3:        Math.round(r3ValNum * 10000) / 10000,
+                        val_p3:        Math.round(p3ValNum * 10000) / 10000,
+                        val_auc:       Math.round(rocAuc * 10000) / 10000,
+                        val_ndcg3:     Math.round(perRace.ndcgK * 10000) / 10000,
+                        val_hit1:      Math.round(perRace.hit1 * 10000) / 10000,
+                        val_ap_macro:  Math.round(perRace.apMacro * 10000) / 10000,
+                        val_logloss_race: Math.round(perRace.loglossRace * 10000) / 10000,
+                        val_best_threshold: history[history.length-1]?.val_best_threshold ?? null,
+                        val_f1_best:   history[history.length-1]?.val_f1_best ?? null,
+                        learningRate:  lr,
+                        best_by:       'val_ndcg3',
+                        history,
+                        run_options:   options,
+                        tfjs_backend:  TFJS_BACKEND_LABEL,
+                        ...data.dataMeta,
+                    }, 'model_best_ndcg3.json', runFolder);
                 }
 
                 // LR scheduling: reduce LR when r3 hasn't improved recently (primary) or loss hasn't (secondary)
@@ -988,4 +1152,18 @@ async function runTraining() {
     histVal.dispose();   statVal.dispose();   maskVal.dispose();   yVal.dispose();
 }
 
-runTraining();
+module.exports = { runTraining };
+
+if (require.main === module) {
+  // Tiny CLI parser: --key=value pairs become opts
+  const opts = {};
+  for (const a of process.argv.slice(2)){
+    const m = a.match(/^--([^=]+)=(.*)$/);
+    if (m){
+      const k = m[1]; let v = m[2];
+      if (v === 'true') v = true; else if (v === 'false') v = false; else if (!isNaN(Number(v))) v = Number(v);
+      opts[k] = v;
+    }
+  }
+  runTraining(opts).catch(err => { console.error(err); process.exit(1); });
+}
