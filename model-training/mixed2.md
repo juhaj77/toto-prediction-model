@@ -50,6 +50,10 @@ node -e "require('./model_mixed_runner_and_race').runTraining({ runId: 'exp-ln-p
 ```
 node -e "require('./model_mixed_runner_and_race').runTraining({ runId: 'exp-ln-preenc16-auxanneal', epochs: 90, temporalSplit: true, scheduler: 'cosine', warmupEpochs: 10, learningRate: 1e-3, minLearningRate: 1e-4, batchSize: 512, bestBy: 'val_ndcg3', auxLossWeight: 0.6, auxSchedule: { from: 0.6, to: 0.3, startEpoch: 40, endEpoch: 70 }, useListNet: false, swapBNtoLN: true, useLayerNormInStatic: true, preEncodeHistory: { units: 16, useLayerNorm: true }, attnHeads: 12, embedDim: 116, ffnDim: 230, runnerProjDim: 64, runnerLstm2Units: 48, dropout: 0.20, outDropout: 0.30, l2: 1e-4, labelSmoothing: 0.05 })" -- --backend=cpu
 ```
+#### 5b) Pre‑enkooderi + annealaus (0.6→0.3 @40–70)
+```
+node -e "require('./model_mixed_runner_and_race').runTraining({ runId: 'exp-ln-preenc16-auxanneal2', epochs: 90, temporalSplit: true, scheduler: 'cosine', warmupEpochs: 10, learningRate: 1e-3, minLearningRate: 1e-4, batchSize: 768, bestBy: 'val_ndcg3', auxLossWeight: 0.6, auxSchedule: { from: 0.6, to: 0.3, startEpoch: 25, endEpoch: 45 }, useListNet: false, swapBNtoLN: true, useLayerNormInStatic: true, preEncodeHistory: { units: 16, useLayerNorm: true }, attnHeads: 12, embedDim: 116, ffnDim: 230, runnerProjDim: 64, runnerLstm2Units: 48, dropout: 0.20, outDropout: 0.30, l2: 1e-4, labelSmoothing: 0.05 })" -- --backend=gpu
+```
 
 #### 6) ListNet‑versio (ei BCE:tä; smoothing ei vaikuta)
 ```
